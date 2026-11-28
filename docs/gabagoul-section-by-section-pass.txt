@@ -1,0 +1,1615 @@
+Gabagoul Section-by-Section Pass
+
+ Gabagoul Section-by-Section Pass
+
+  Paste each section into Claude Code when it's ready. Work in its own branch, section-
+  pass , separate from the latency and Director Suite work, and ask before merging into
+  main.
+  Progress, Nov 27, 2026: everything sent up to Nov 26 is reported done and pushed to
+  main (STATUS.md is the source of truth). Section 26's engine is built on section-26-engine
+  (31+ commits, all switches off). Next: the engine settings screen, quick latency wins and
+  one full rebuild from main plus the engine branch. Kill switch is merged and live (main
+  8bb443a, trading bridge restarted on the new code); one medium review item left: a
+  premium stop partly blocked by a manual resting SELL doesn't report the held-back
+  contracts. Section-pass: layout steps 1 to 6, every converted page, the widget builder and
+  the fortune-cookie run are done (3,457 frontend and 1,699 Rust tests).
+
+  You're doing a hard functional pass on Gabagoul Command Center, one window at a time.
+  Read the existing code for each window first and map these changes onto it rather than
+  rebuilding. Measure before and after, keep changes small, and ask before big refactors. A
+  separate UI polish pass will come later, so focus on function here; only fix readability
+  where noted.
+
+ Section 1: Comms
+
+    1. Agent tabs. Frozen agents (Booking Desk, and Ops unless I give it a job) are greyed
+       out or tucked into a "Frozen" group, not shown alongside active agents.
+
+    2. Agent Chatter off by default. The agent log can stay as text. Internal agent back-and-
+       forth is never spoken aloud, to save ElevenLabs credits.
+
+    3. Agent report inbox. Each agent tab shows its finished reports with unread badges
+       and a replay button, as in the per-agent voices and Comms inbox prompt.
+
+    4. Timing tags. Keep the source and time tags on each message (for example lmstudio,
+       3811ms). Add time to first word once voice streaming is in.
+
+    5. Help desk instead of Ask Overseer on every message. Replace the per-message Ask
+       Overseer button with one "Something's off" button that reviews the last few turns
+       using the Claude CLI. Its diagnosis is saved as a fix ticket in a list I can hand straight to
+       Claude Code. It runs on demand only, never automatically. Note that it sends
+       conversation content to a cloud service.
+
+                                                                                                                                                                                                                                                    Page 1 of 36
+Gabagoul Section-by-Section Pass
+
+    6. Dropped tasks. If I change the subject mid-task, Tony keeps the unfinished task and
+       either finishes it or asks, so requests like "check my last five Gmail messages" aren't
+       silently abandoned.
+
+    7. Right source. "Check my messages" or "check my Gmail" must read the actual Gmail
+       inbox or WhatsApp, not recent chats or bookings. Tony reads them directly, never
+       through the Booking Desk.
+
+    8. ElevenLabs 429 errors. Credits are fine (12,000 left), so these are concurrency limits.
+       Make sure only one ElevenLabs request runs at a time through the voice queue, and
+       log any 429s.
+
+    9. Readability. The chat panel is too transparent over the wallpaper. Darken it slightly.
+
+ Section 2: MCP and tool registry
+
+    1. Tony's tools by mode. Tony no longer gets every tool. He has a small always-on base
+       set (time, weather, Gmail read and draft, WhatsApp read, web search, knowledge
+       graph) and each mode adds its own tools on top: Builder adds Git and Filesystem;
+       Operations adds the business tools; Executive and Learning get what suits them.
+       Make Tony's pills editable per mode, like the other agents.
+
+    2. Frozen agents get no tools. Remove all pills from the Booking Desk, such as Time and
+       Filesystem, so nothing routes to it.
+
+    3. Librarian safety. The Librarian's AnythingLLM workspace is in automatic chat mode,
+       which lets it run tools that can write files, Git or SQLite. Switch it to Query mode, and
+       keep it to read-only tools plus its scheduled tidy-up script.
+
+    4. Tool counts. Show how many tools each agent gets and roughly how many prompt
+       tokens they add, with a warning when an agent goes over about 10 tools.
+
+    5. One owner per tool. Flag any tool enabled for more than one active agent and ask
+       whether that's intended.
+
+ Section 3: Ops and Biz Ops
+
+    1. Explain in plain language what the Ops agent currently does in the code: its prompt,
+       tools, triggers and whether it ever runs. Same for Biz Ops.
+
+    2. If Ops is an unused placeholder, freeze it for now. Suggest a clear job I could give it
+       instead, such as scheduling and job tracking for my masonry business, kept distinct
+       from Biz Ops (my online stores and Instagram).
+
+    3. Rename them if that makes the split clearer, and ask me before changing anything.
+
+                                                                                                                                                                                                                                                    Page 2 of 36
+Gabagoul Section-by-Section Pass
+
+ Section 4: Login and sessions
+
+    1. Fix the frequent logouts. The session is meant to last an hour but I get logged out
+       about every five minutes. Check whether sessions live only in gateway memory (so
+       every gateway restart logs me out), whether the timeout uses the wrong units, and
+       whether activity refreshes it. Persist sessions securely so they survive restarts,
+       refresh while I'm active, and make the timeout a setting.
+
+    2. Phone approval login, like IBKR's IB Key. When I click log in on the desktop, my phone
+       app gets a push notification. I approve with my fingerprint (Android biometric
+       prompt) and the desktop logs in. Use a signed, short-lived, one-time approval tied to
+       my paired phone. Keep the PIN as a fallback if the phone isn't available.
+
+    3. Show where I'm logged in (desktop, laptop, phone) with a way to sign out a device.
+
+ Section 5: Staging hub and widgets
+
+    1. Finished items shouldn't sit in staging. Add a push to the Widgets library (or the right
+       library) when something is done, and allow deleting or archiving items in staging.
+
+    2. Test the "describe a widget" builder end to end with this request: "A fortune cookie
+       widget. Tap the cookie to crack it open and show a random fortune, with a new one
+       each day. Add a button for another fortune, and keep a short history of past fortunes."
+       Report whether it builds, saves to the Widgets library and works. Fix whatever breaks.
+
+    3. Conflicting build status. The same "Brainstorm build" (the E46 clock widget) shows
+       Deployed and Ready for merge at the top, but Failed iter 3/3 in Build Runners. Fix the
+       status so each build shows one true state, and clear or archive stale runs.
+
+    4. Take the Librarian out of the build chain. The Ideas & Tasks Ledger says builds go
+       Prompter, Librarian, Designer, Coder. Change it to Prompter, Designer, Coder, with all
+       of them reading and writing shared storage directly, max two revision rounds.
+
+    5. One clear flow. Play Place, the Ideas & Tasks Ledger, Staging and the Repair queue
+       overlap. Simplify into one pipeline with clear stages: Idea, Building, Review, Done
+       (Widgets library or sidebar). Repairs show as a stage or tag, not a separate area.
+       Explain the plan before changing it.
+
+    6. Make Staging and Repair queue fully visible at the top right; they're currently cut off.
+    7. Widget builder follows the full brief. The fortune cookie test built instantly but only
+
+       showed one line of text, skipping the tap-to-crack, daily fortune, new-fortune button
+       and history. Make the builder check its result against every point in my request and
+       keep going until each is met or it tells me what's missing.
+
+                                                                                                                                                                                                                                                    Page 3 of 36
+Gabagoul Section-by-Section Pass
+
+    8. Designer and ComfyUI handshake. Widgets currently have no visual style. For each
+       widget, the Designer creates the look first, using ComfyUI (via the GPU baton) for
+       illustrations, animation frames, icons and textures, then hands those assets to the
+       Coder. Skip ComfyUI for simple widgets that don't need art.
+
+    9. Style kit. Save a dashboard style kit (colours, fonts, corner radius, glass effect,
+       motion) that every widget uses automatically, so I don't have to describe the look
+       each time. Let me override it per widget.
+
+  10. Play Place pipeline: thought, idea, build, refine, repeat.
+             Quick capture: "park this" to Tony creates a card with a one-line pitch.
+             One-tap prototype: turn a card into a rough working version.
+             Version history for every refine round, with rollback.
+             Voice feedback: notes like "make the needle red" go straight into the next round.
+             Graduate to Widgets or the sidebar, or shelve without deleting.
+
+  11. One path for every widget. Right now quick widgets appear straight on the page
+       while bigger builds go through staging. Make it one path: describing a widget from
+       the home page's edit tab creates a draft in Play Place without leaving the home page.
+       Show a small live preview card there with a link to open it in Play Place. Refine it in Play
+       Place, then promote it to the home page or sidebar when I approve. Nothing lands on
+       the home page without my approval.
+
+  12. Variations at every step. When I give Play Place an idea, show up to four quick mock-
+       ups (A, B, C, D) side by side, as lightweight sketches or static previews rather than full
+       builds, so it stays fast and light on the GPU. I can like or dislike each, comment on parts
+       ("A's colours, C's layout"), and the next round combines my picks. Let me set how
+       many variations I get, or turn them off.
+
+  13. Taste profile shared across the app. Every pick, rejection and note updates one
+       shared taste profile used by Play Place, widgets, the Designer and the Director Suite's
+       style memory. Let me view, edit and reset it, and show briefly why a suggestion fits
+       ("you usually pick dark, rounded designs").
+
+  14. Show the functions. Each mock-up lists in plain words what it does (features, inputs,
+       data it uses) so I know what I'm picking, not just how it looks.
+
+  15. Build outside the app. Any Play Place idea can be exported as its own standalone
+       project or app (new repo or folder, with the brief, assets and code so far) instead of a
+       widget. Big builds are queued as background jobs through the GPU baton and run
+       when the machine is free, never stealing compute while I'm working with Tony.
+
+                                                                                                                                                                                                                                                    Page 4 of 36
+Gabagoul Section-by-Section Pass
+
+ Section 6: Home page and widget edit mode
+
+    1. No overlaps. Widgets snap to the grid and never overlap (the Mantra currently covers
+       n8n, and the Voice Console crowds them). Resizing pushes neighbours aside.
+
+    2. Readability. Glass widgets are hard to read over busy wallpapers. Keep panels
+       transparent: the wallpaper is the glue of the app and should stay the star. Improve
+       legibility through the text instead: larger and bolder fonts, a soft text shadow or
+       subtle engraved effect, and light blur only directly behind text if needed. Auto-adjust
+       text colour per wallpaper for contrast, and keep per-widget opacity, saved per
+       wallpaper.
+
+    3. Widget drawer. Replace the sideways-scrolling Add row, which gets cut off, with a
+       searchable drawer grouped by category.
+
+    4. n8n widget. It needs an API key and does nothing yet. Set it up through settings, or
+       hide the widget until connected.
+
+    5. Audition Pipeline auto-fill (after Tony's routing fixes). Once Tony reliably reads Gmail
+       directly, fill this widget from the booking and audition search (sender, role, date,
+       deadline, status), with my approval before adding anything. Until then, leave it manual.
+
+    6. Bigger scrollbars on both sides, easier to grab.
+    7. Tap to focus. Widgets rest as clear glass. Clicking or tapping one brings it into focus:
+
+       it turns solid and readable, can expand into a larger interactive view, and click again
+       (or click away) to return to glass. The glass toggle sets each widget's resting look;
+       focus is temporary.
+    8. Named pages as presets. Let me rename pages (for example "Business", "Acting",
+       "Build") instead of Page 1, Page 2. Each page saves its own widgets, layout and
+       wallpaper. Optionally link a page to one of Tony's modes, so switching mode switches
+       page, and vice versa. Allow reordering, duplicating and deleting pages.
+    9. Home view. The first page is a clean view and aesthetic page: wallpaper first, with a
+       few at-a-glance widgets: System stats (CPU, RAM), Agent Nodes, weather, a clock
+       and the mantra. It's what the app opens on at startup. Let me choose which page is
+       the startup page.
+  10. Never lose a build. Deleting a build in staging deleted my E46 tachometer clock
+       widget for good. First, try to recover it: search git branches, history, worktrees and
+       the staging folder for the "Brainstorm build" clock widget and restore it to the library.
+       Then change deletion everywhere: delete moves items to a Trash in the library,
+       recoverable for 30 days, with an undo toast. Add a widget Library where I can save,
+       archive and reuse any build, separate from what's on my pages.
+
+                                                                                                                                                                                                                                                    Page 5 of 36
+Gabagoul Section-by-Section Pass
+
+  11. Frameless, any-shape widgets. A round clock was built inside a big square block.
+       Widgets must support a frameless mode with a fully transparent background, so the
+       widget's own shape (circle, irregular, floating text) sits directly on the wallpaper with
+       no box, title bar or border. Show edit handles only in edit mode or on hover. The widget
+       builder should pick frameless automatically when the design isn't a rectangle, and
+       follow the style kit.
+
+  12. Fully customisable widgets. The Mantra takes up a huge block even though its text is
+       small, so I can't fit other widgets around it. Every widget should be freely resizable
+       down to its content's natural size, with content that scales to fit rather than fixed
+       large boxes. Per widget, let me change font, size, colour, alignment, what it shows and
+       its frame style, saved with the page.
+
+ Section 7: Phone quick access to Tony
+
+  I want to summon Tony instantly from my Galaxy S22 instead of the camera. I'll set the side
+  key double press to open the Tony app myself.
+
+    1. Open straight into listening. When launched from the side key or a shortcut, the app
+       opens directly into voice mode and starts listening, with no extra taps. Use a
+       dedicated launch intent or app shortcut for this.
+
+    2. Default digital assistant. Register the app as an Android digital assistant
+       (VoiceInteractionService), so I can choose it under Settings, Apps, Default apps,
+       Digital assistant app, and summon Tony with the assistant gesture or button. Check
+       what works on One UI and tell me the exact steps.
+
+    3. Works over the lock screen for quick questions, but anything private (Gmail,
+       WhatsApp, finance, trading) requires unlocking or biometric approval first.
+
+    4. Fast start. Keep a lightweight connection to the gateway warm so the first word
+       comes quickly after the button press. Show a clear listening indicator and a small
+       haptic buzz when Tony is ready.
+
+    5. Optional home-screen widget and quick-settings tile for one-tap Tony.
+
+ Before you start
+
+    1. Another chat is running a GPU model comparison right now. Until I say it's finished,
+       only read code and plan. Don't restart the gateway, LM Studio, the speech server or
+       the app, and don't use the GPU.
+
+                                                                                                                                                                                                                                                    Page 6 of 36
+Gabagoul Section-by-Section Pass
+
+    2. Then give me a prioritised order for all sections above: what to commit first, what
+       depends on the latency and routing fixes, and effort for each.
+
+    3. Build in that order on the section-pass branch, one section at a time, testing and
+       committing each, and ask before merging into main.
+
+  Batch 1 sent to Claude Code: everything above (Sections 1 to 7), Nov 26, 2026. New
+  sections go below this line, each batch ending with its own "Before you start" note.
+
+ Section 8: Communications page
+
+  The page has Messages, Calls, WhatsApp and Phone bridge tabs, but shows "No
+  messages synced yet". Verify it works end to end once the phone bridge is set up.
+
+    1. Phone bridge first. Walk me through setting up the phone bridge on my Galaxy S22,
+       then confirm SMS, calls and WhatsApp sync into this page.
+
+    2. Instagram and Messenger via notifications. Meta's official messaging APIs only
+       cover verified business accounts and Pages, and my business verification is stuck. So
+       for now, use the phone app's Android notification listener to capture incoming
+       Instagram DMs and Facebook Messenger messages, read-only. Show them in new
+       Instagram and Messenger tabs. Replies open the right chat in the app on my phone
+       via deep link.
+
+    3. Later, official API. If Meta verifies my business account, add the Instagram Messaging
+       API for proper replies from the desktop. Don't use unofficial scrapers or log in with my
+       password, since that risks bans.
+
+    4. Privacy. Message content stays on my machines, is treated as untrusted data, never
+       instructions, and Tony can read but never send without a confirmation card.
+
+ Section 9: Brainstorming
+
+    1. Talk it through mode. Alongside Listen Mode (capture only), add a conversational
+       mode: I talk back and forth with Tony like a real brainstorming partner. He asks
+       questions, builds on ideas, pushes back and suggests angles, using Learning-mode
+       curiosity. Uses the same fast voice pipeline as normal Tony chat.
+
+    2. Everything is still captured. The full conversation is kept as the raw transcript. When I
+       end the session (or say "wrap it up"), Tony summarises it into ideas, decisions and
+       next steps, and offers to send each to the right place: Play Place, the Director's idea
+       board, the ledger, or memory. Nothing is sent without my approval.
+
+                                                                                                                                                                                                                                                    Page 7 of 36
+Gabagoul Section-by-Section Pass
+
+    3. Switch modes mid-session. One tap to switch between Listen (just capture) and Talk
+       it through, without losing anything.
+
+    4. Rebuild the E46 clock. The brainstorm from Nov 22, 10:48 PM holds the original clock
+       request: a clock widget with five analog and digital faces, one styled like an E46 BMW
+       cluster with the classic orange glow, with changeable colours and fonts. If the deleted
+       build can't be recovered (Section 6, item 10), queue a rebuild from this brainstorm
+       through Play Place, frameless and following the style kit.
+
+ Section 10: Top bar clock and weather effects
+
+    1. Weather effects follow live weather. The wallpaper effects (sun, rain, snow, cloud,
+       leaves, night and so on) switch automatically based on current local weather and time
+       of day. Move the manual effect picker out of the top bar into the app's weather
+       section (where the forecast lives), with an override option.
+
+    2. Built-in clock in the top bar. Put a permanent clock in the space that picker used, top
+       right: time, and optionally date and current temperature. Clean, readable, styled to
+       match the top bar, clicking it opens alarms and dates. This is separate from clock
+       widgets.
+
+    3. Find a small spot elsewhere (for example a single icon) for any remaining effect
+       controls.
+
+    4. Maps widget. Maps are connected in settings but there's no widget. Add a maps
+       widget showing my location, saved routes and live travel time to upcoming bookings,
+       auditions and job sites from my calendar, with traffic. Tapping it opens directions on
+       my phone. Use the existing maps connection; don't add a new provider without
+       asking.
+
+  Batch 2 sent to Claude Code: Sections 8 to 10, Nov 26, 2026. New sections go below this
+  line.
+
+ Section 11: Finance
+
+  I'm in Canada (CA$, HST). I want one place to scan anything, have it sorted automatically,
+  and have all the maths done for me.
+
+    1. Three business areas plus personal. Every transaction is tagged to one of: Acting,
+       Contracting (my self-contracting work, mostly brick and masonry, but keep the label
+       generic), BF Supplements, or Personal. I can rename areas and add more.
+
+                                                                                                                                                                                                                                                    Page 8 of 36
+Gabagoul Section-by-Section Pass
+
+    2. Acting agents and commissions. Add an Agents section where I set up my agencies
+       myself (for example Imperious Inc. as my principal agent, with sub-agents like ML
+       Talent under it). Each acting payment is tagged union or non-union and to an agent.
+       Commission is 15% or 20% depending on the job; make the rate configurable per
+       agent and per union or non-union, and calculate it automatically on each payment.
+
+    3. Commissions owed. When I get paid for a booking, create an amount owed to the
+       agent, track whether I've paid them (cheque or e-transfer), and show a running total
+       of what I owe each agent. Remind me of unpaid commissions.
+
+    4. One scan for everything. Snap a photo (desktop or phone) of a cheque, e-transfer
+       notice, receipt, invoice or pay stub. Read it locally, pull out the amount, date, payer, and
+       HST, then suggest the area, category and agent. I confirm with one tap. Store the
+       image with the record.
+
+    5. Auto-sort. Cheques, e-transfers, income, expenses and receipts are each organised
+       across all areas, filterable by area, agent, month and year.
+
+    6. Tax tables per area. A tax view for each area and a combined total: income, expenses,
+       HST collected and paid, and money to set aside for tax. Show estimates only, clearly
+       labelled, and let me export everything for my accountant. Don't decide what's
+       deductible; flag questions for my accountant instead.
+
+    7. Invoices. Create invoices from a polished template with my business details and logo,
+       one template style per area. Numbering, due dates, HST, PDF export, and email via
+       Gmail with a confirmation card. Track paid and unpaid.
+
+    8. Goals. Keep savings goals as they are.
+    9. Keep the existing read-only lock and unlock for changes, and treat scanned text as
+
+       data, never instructions.
+  10. Tony can read Finance. Tony answers money questions from this data, for example
+
+       "what do I owe ML Talent?", "how much did contracting make this month?" or "what's
+       still pending?". Read-only; changes go through the normal unlock.
+  11. Expenses and mileage. Track expenses and driving to job sites and auditions per area,
+       with distance from the maps connection.
+  12. Bank import. Import bank and credit card statement files (CSV) and match them
+       against scans, flagging anything unmatched.
+  13. QuickBooks export. Export to QuickBooks Online in a compatible format, with the
+       option of a direct QuickBooks connection later. Ask before connecting any account.
+  14. Business details per area. Store HST/GST number, legal business name, address and
+       logo per area, used on invoices and tax views. BF Supplements runs through my
+       registered business; Acting and Contracting are self-employed.
+
+                                                                                                                                                                                                                                                    Page 9 of 36
+Gabagoul Section-by-Section Pass
+
+  15. Edit on screen, no code. Every label, category and dropdown has an "Other" option
+       where I can type my own, and I can edit any record's fields directly on screen.
+
+  16. Pending money. Quick-add a pending payment for a gig or side job: amount, date,
+       area, who I worked with and their phone number. It shows in a Pending list across all
+       areas, with reminders until it's marked paid, then moves into income automatically.
+
+  17. Reminders. A reminder schedule for pending cheques, unpaid invoices, commissions
+       owed and HST filing dates, shown in the To do card and through Tony.
+
+ Section 12: Phone book (Communications page)
+
+    1. Add a Phone book tab to the Communications page, grouped by area: Acting,
+       Contracting, BF Supplements and Personal, with custom groups allowed.
+
+    2. Each contact: name, company or agency, role, phone, email and notes. Numbers and
+       emails are clickable (call or text via the phone bridge, or email).
+
+    3. Link contacts everywhere: Finance pending payments, invoices and agents, the
+       Audition Pipeline, and messages. Adding a phone number in Finance offers to save the
+       contact.
+
+    4. Import from my phone's contacts on request, and let me edit everything on screen.
+  18. HST/GST section. Once I add an HST/GST number, show an HST/GST view: HST
+
+       collected and paid on every record, labelled by area and category (Personal, Acting,
+       Contracting, BF Supplements, vehicle and so on). Let me choose the reporting period
+       (monthly, quarterly or yearly), review each item, and mark which to include in my
+       return. Totals update automatically, with an export for filing or my accountant. Track
+       my running revenue against the $30,000 small supplier threshold and alert me as I
+       approach it.
+  19. Instant commission maths. When I enter or scan an acting payment, ask for the
+       commission (quick picks: 15%, 20%, 0%, or custom) with a toggle to turn commission
+       off for that payment. Instantly show the commission owed and my net amount, and
+       add the commission to what I owe that agent. Remember my usual rate per agent and
+       pre-fill it. All calculations update live as I edit any field.
+  20. Contracting jobs: self or subbed. Each contracting job is marked "Did it myself" or
+       "Subbed out". If subbed, record who did it, what I pay them (amount or percentage)
+       and whether it's paid; show my profit per job automatically. Link subs to the phone
+       book. Keep it simple: a few fields, no complicated job costing.
+
+                                                                                                                                                                                                                                                  Page 10 of 36
+Gabagoul Section-by-Section Pass
+
+ Section 13: Business Ops
+
+  Currently two businesses: Trades & Contracting, and Supplements & E-commerce (BF
+  Supplements / Born Fortuna).
+
+    1. Add Acting as a third business. I'm the business: bookings, auditions, agents
+       (Imperious Inc. and sub-agents), commissions, self-tapes and acting income. Its own
+       memory, ledger tag, workspace and scope, matching the Finance areas, so Acting,
+       Contracting and BF Supplements line up everywhere.
+
+    2. Email per business. Born Fortuna already has its own email address and pipeline; I
+       currently use my main email for everything else. Let each business be linked to one or
+       more email accounts, so Tony and the business views know which inbox belongs
+       where. Support adding more accounts later.
+
+    3. Hide the plumbing. Move technical details (business id, ledger tag, memory path,
+       workspace, librarian scope) behind an "Advanced" toggle. The card shows name,
+       description, status, and key numbers.
+
+    4. Useful business cards. Each card shows at a glance: income this month, pending
+       payments, open jobs or bookings, unread messages, and next deadline, pulled from
+       Finance, Comms and calendar.
+
+    5. Explain the tabs. Review Queue, Audit, and Digest & alerts: confirm what each does,
+       fill or freeze placeholders, and tell me which are unused.
+
+ Section 14: Trading
+
+  The trading page already follows the earlier plan: the LLM is retired as a trader and acts as
+  an after-hours analyst; Engine R (deterministic rules) executes; there's a 70/30 build/test
+  report, risk limits and a kill switch. Keep all of that. Fix and improve:
+
+    1. IBKR connection (top priority). Every run today is blocked with "bridge not
+       connected to TWS", and pipeline health shows ConnectionRefusedError (WinError
+       1225). Add IB Gateway (or TWS) to the startup script, auto-login where IBKR allows,
+       and auto-reconnect if it drops, with an alert when it's down. Confirm the API port and
+       settings.
+
+    2. Consistent status. Pipeline health says FAIL while the paper account card says
+       Connected. Show one true connection status everywhere.
+
+    3. Every failure has a reason. Several approved trades show only "failed". Log and
+       display the exact reason (for example rejected by IBKR, no quote, market closed).
+
+                                                                                                                                                                                                                                                  Page 11 of 36
+Gabagoul Section-by-Section Pass
+
+    4. Market calendar. Load the US market holiday and half-day calendar so the engine
+       doesn't attempt trades on closed days (today, Nov 26, is Thanksgiving) and the UI
+       shows "Market closed: holiday".
+
+    5. Desk modes. Advisory, Semi-auto and Full auto: Full auto requires my PIN plus phone
+       fingerprint approval to enable, and stays off until Engine R has a solid paper-trading
+       track record (for example 100+ paper trades with positive expectancy, in line with the
+       test). Show that progress on the page.
+
+    6. Track record over backtest. The 70/30 test looks consistent (test expectancy +0.43R
+       vs build +0.40R) but has only 38 test trades. Make the paper journal the headline
+       metric, compared side by side with the backtest and the SPY baseline, and flag if
+       paper results drift from the test.
+
+    7. Discord author rankings need a minimum sample. Grey out or hide authors with
+       fewer than about 30 scored calls (for example 75% on 8 calls is likely noise), show
+       sample size clearly, and sort by adjusted hit rate with a confidence band. Discord calls
+       stay context only, never trades.
+
+    8. One data source. The supply/demand chart uses unofficial Yahoo Finance data. Once
+       IBKR is connected, use IBKR data across all charts and the engine so everything
+       matches; keep Yahoo only as a labelled fallback.
+
+    9. After-hours analyst. Keep it to rule-change suggestions that I approve through the
+       approval panel. Show its suggestions with the backtest impact of each before I
+       approve.
+
+ Section 15: Language
+
+  The section already has Live Translate (including hand-the-phone-over mode), Learn &
+  Practice with a conversational coach and drills, and a Library. Keep it and add:
+
+    1. Spaced repetition. Saved library items automatically become flashcards scheduled
+       just before I'd forget them, with "got it" and "review" feeding the schedule.
+
+    2. Camera translate. On the phone, point the camera at a sign, menu or message and
+       translate it, with the option to save to the library.
+
+    3. Pronunciation feedback. Local Whisper checks my spoken Italian and highlights
+       words to work on, with Tony's voice modelling the correct version.
+
+    4. Accents for acting. Practise Italian accents, dialects or lines for a role, linked to Scene
+       Reader.
+
+    5. Daily five minutes. Tony offers a short daily lesson built from my saved and due
+       words. Easy to snooze.
+
+                                                                                                                                                                                                                                                  Page 12 of 36
+Gabagoul Section-by-Section Pass
+
+    6. Language curveballs in everyday chat. A layer that works across all of Tony's modes,
+       not a separate mode. A slider in the Language app (off, light, medium, heavy) controls
+       it, and Learning mode can raise it automatically. Tony occasionally slips in Italian I've
+       learned or am learning, in normal conversation: a phrase, a question, or rephrasing
+       something I said, at my level. Not every message; frequency is adjustable (off, light,
+       medium, heavy). If I answer in Italian he gives a quick tip; if I don't get it, he translates.
+       Each curveball counts as a review in the spaced repetition schedule.
+
+    7. Visuals for vocabulary. Lessons and flashcards can show a generated image for each
+       word or phrase, made with ComfyUI as background batch jobs through the GPU baton
+       and cached, never generated live during chat.
+
+ Section 16: Vault, backups and memory
+
+  This is where search, backups and RAG memory (Memory Books, harvest and fine-tuning
+  datasets) live. Keep it and fix:
+
+    1. Suspicious backup. The latest backup (cc-20261126-101440.zip) is 2 KB while others
+       are about 15 MB. Check whether it failed or was empty, and make every backup verify
+       itself (size and contents) with an alert on failure.
+
+    2. Off-machine copy. Backups are only on Mortadella. Add a second destination
+       (another drive, and optionally encrypted cloud storage) so a drive failure doesn't take
+       the backups with it.
+
+    3. Vault password not set. Prompt me to set it, explain that a lost password means
+       locked archives can't be opened, and offer a recovery option such as a printed
+       recovery key.
+
+    4. Hygiene daemon interval. It still sweeps every minute. Change to hourly or idle-only,
+       in line with the librarian plan.
+
+    5. Safety order. Keep auto-flush cloud and pruning of Tony's threads off until at least
+       one harvest has been verified (currently "last verified harvest: never"). Run a manual
+       harvest and verification first, and show the result.
+
+    6. Vault search. Confirm it covers everything (brainstorms, receipts, invoices, cheques,
+       scripts and auditions, jobs, documents, chats) and that Tony can use it to answer
+       questions.
+
+                                                                                                                                                                                                                                                  Page 13 of 36
+Gabagoul Section-by-Section Pass
+
+ Section 17: Wallpapers and side panel
+
+    1. Customisable side panel. Let me reorder sidebar icons by drag and drop, hide ones I
+       don't use, pin favourites to the top, group them, and show labels on hover or always.
+       Save the layout per device. The whole app should be customisable throughout,
+       without code.
+
+    2. Wallpapers sync across devices. Uploads currently stay in one device's browser
+       storage (IndexedDB). Store them on the gateway so desktop, laptop and phone share
+       the same library, with offline caching.
+
+    3. Generate wallpapers. Add a "Generate" button that makes new wallpapers with
+       ComfyUI (as a background job through the GPU baton), using my style, my E46 and
+       Toronto scenes as references where possible.
+
+    4. Keep rotate interval, shuffle, sync to weather and time, and per-page tags (Home,
+       Flowchart, Orbital). Let a wallpaper be tied to a named page preset.
+
+ Section 18: Flowchart, Blueprint and Orbital views
+
+  Three views of the system: Schematic Flowchart, Gabagoul Blueprint (holographic E46
+  wagon) and Orbital Ecosystem (star map with the gabagool ship). Keep all three, make
+  them cohesive and better.
+
+    1. One source of truth. All three read the same live telemetry and agent state, so status
+       (idle, busy, frozen, error, queued for the GPU) is identical everywhere.
+
+    2. One visual language. Each agent has the same colour, icon and status style in every
+       view, defined once in the shared theme. Clicking an agent in any view opens the same
+       detail panel (status, tools, last task, timings, voice, on/off switch).
+
+    3. Reflect the new architecture. Frozen agents (Booking Desk, Ops until it becomes the
+       Job Desk) appear dimmed. After the routing fix, the Librarian is shown as background
+       storage and a scheduled script, not in the request path. Acting appears as a third
+       business.
+
+    4. Show real routing. Animate actual hops for each request (Tony to tools or a specialist
+       and back) with timings, so I can see delays live, matching the stress tests.
+
+    5. Performance. Pause 3D rendering when a view isn't visible, cap frame rate, and keep
+       the heavy 3D views desktop only (phone gets the flowchart).
+
+    6. Fix the open queue item: Instagram has no access token; link it to the Business Ops
+       and Communications setup rather than leaving it as an error.
+
+                                                                                                                                                                                                                                                  Page 14 of 36
+Gabagoul Section-by-Section Pass
+
+    7. Visual polish can wait for the UI pass, but make the three views feel like one product:
+       shared fonts, glow style and colours.
+
+ Section 19: Power, standby and settings
+
+    1. Standby button. Add Standby next to Exit and Refresh. Standby hides the app
+       window to the system tray while the gateway, Tony's model, speech-to-text, the
+       trading engine, backups and scheduled jobs keep running, so the phone and remote
+       access keep working when I'm away. A tray icon shows status and lets me reopen,
+       switch to Standby or exit.
+
+    2. Closing the window = Standby by default. The X button sends the app to Standby
+       rather than quitting. Exit stays as the explicit full shutdown, with a confirm that warns
+       the phone will lose Tony.
+
+    3. Gateway independent of the window. Make sure the gateway and core services run
+       as background processes started at boot, not tied to the app window, so a UI crash or
+       refresh never takes Tony offline.
+
+    4. Model Lab. Keep the A/B comparison. Clearly mark models that won't fit (for example
+       Qwen2.5 Coder 14B spills to RAM and is slow, Pixtral 12B is tight at 4k context) and
+       block setting them as Tony's brain without a warning.
+
+    5. Gateway & Network panel. Keep it, and add the NetBird phone connection status
+       (direct or relayed, with ping) alongside the local gateway and internet checks.
+
+ Section 20: Settings audit
+
+ Model Lab findings
+
+  Tony's Qwen3.5 9B (Q4_K_M): first content about 212 ms, first speakable chunk 1.01 s,
+  total answer 2.31 s, 26 tok/s. So the model itself is fast; the ~20 s turns come from routing,
+  voice and queuing.
+  Huihui Qwen3.5 9B abliterated (Q5_K_M): better tool use (required args 93% vs 84%,
+  two-step 100% vs 75%) but slower (3.13 s total) and failed guardrails twice
+  (claimed/complied: 2). Keep Qwen as Tony. Optionally test a Q4_K_M Huihui later, and only
+  switch if guardrails hold at 100%.
+
+                                                                                                                                                                                                                                                  Page 15 of 36
+Gabagoul Section-by-Section Pass
+
+ Fixes
+
+    1. Routing triggers cause the mystery hops. The Booking Desk's topic triggers include
+       "last 5 messages", "check my texts", casting call, audition, self-tape and "draft email to
+       agent", which is why message checks went to the Booking Desk. Since it's frozen,
+       remove all Booking Desk triggers. Move message, email and WhatsApp checks to
+       Tony's own direct tools; auditions and self-tapes to Tony and the Director. A frozen
+       agent's triggers must never fire.
+
+    2. Clean up overlapping triggers. Biz Ops currently claims contracting, masonry,
+       invoices, quotes, job sites and subcontractors, overlapping Ops and Finance. Re-split
+       to match the plan: Biz Ops for BF Supplements and Instagram; the future Ops Job
+       Desk for contracting jobs; Finance for invoices, receipts and money; calendar and
+       schedule go to Tony. Add Acting triggers. Show a warning when a phrase matches
+       more than one agent, and keep the Test a phrase box.
+
+    3. Voice roster. Auto-speak is on for Prompter and Designer, and frozen agents (Booking
+       Desk, Librarian) still have ElevenLabs voices. Turn auto-speak off for all except Tony;
+       specialists only speak their final reports through the queued per-agent voice setup.
+       Frozen agents get no voice.
+
+    4. Narration. Keep Milestones. Use Local Kokoro for narration lines to save ElevenLabs
+       credits and avoid 429s; keep ElevenLabs for Tony's replies and agent reports.
+
+    5. Live captions. Captions every 600 ms run an extra Whisper transcription on the GPU
+       each time, competing with Tony. Default to off or a longer spacing, and test whether
+       distil-large-v3 is faster than large-v3-turbo with equal accuracy.
+
+    6. Compute routing. Tony already uses 10.1 to 10.3 GB of 12 GB VRAM (about 86%), so
+       Hybrid auto-overflow at 90% can push turns to the Droplet's tiny Qwen3 0.6B. Default
+       to Local only; overflow only to a capable model, and never for Tony's chat turns.
+
+    7. Permissions. Set "External cloud / droplet routing" to Ask instead of Allow, since it
+       sends data off the machine.
+
+    8. Sub-agent workspaces. Unmap the Librarian and Booking workspaces from live
+       delegation. Review the 90 s sub-agent timeout; long tasks should run in the
+       background, not block Tony.
+
+    9. Verifier. Claude Code CLI checks mutating plans only. Confirm it never runs on normal
+       chat turns.
+
+  10. Build on what works: instant cues. Voice cue widgets respond instantly because they
+       skip the model. Add a fast path: common requests (time, weather, start music, mode
+       switches, "what's pending") are matched and answered directly without a full model
+       run, with the model as fallback. Let me turn any frequent request into a cue.
+
+                                                                                                                                                                                                                                                  Page 16 of 36
+Gabagoul Section-by-Section Pass
+
+  11. Spotify tool bloat. Spotify gives Tony 23 tools. Reduce Tony's set to about five (now
+       playing, play, pause, next, play a playlist or search). Move the rest behind instant cues
+       or a single "more music" tool.
+
+  12. Lock down AnythingLLM's MCP config. It gives its agents servers with no read-only
+       or role limits (agentmail, ai-hub, brave-search, chrome-devtools, context7, fetch, git,
+       github, gmail-multi, knowledge-graph, pal, playwright, sentry, sequential-thinking,
+       serena, sqlite, time, whatsapp). Restrict each workspace to only the servers that
+       agent needs, read-only where possible, consistent with the OS registry. Set the
+       Librarian workspace to Query mode.
+
+  13. Gmail tools. Move gmail.booking_scan and the other Gmail tools off the Booking
+       Desk; Tony owns Gmail (read, search, booking scan, create draft).
+
+  14. Model library. Hermes-3-Llama-3.1-8B shows as incomplete, so don't use it for training
+       yet. Llama-3.1-8B-Instruct has full Hugging Face weights and suits practice QLoRA
+       runs instead. Clean up incomplete folders as per the earlier model cleanup prompt,
+       and show models on both C: and D:.
+
+  15. Overseer cost. The Overseer uses Claude via API key. Keep it on demand only, and
+       show an estimated cost per review.
+
+ Section 21: Integrations
+
+    1. One owner per integration (from the pills on this page). WhatsApp Bridge is enabled
+       for Tony and the Booking Desk; remove the Booking Desk. Shotcut (28 tools) and
+       MediaForge belong to the Director only, never Tony. Instagram: Biz Ops owns it; Tony
+       gets read-only profile and insights at most. Maps: Tony and Ops (the future Job
+       Desk). Apply the same rule to every card.
+
+    2. Instagram token is invalid or expired. Show a clear "Reconnect" step and track the
+       token's expiry once renewed, with a reminder before it lapses. Link this to the
+       Business Ops and Communications setup.
+
+    3. Google Calendar is set up twice. The Apps Script backend says "not set up" while n8n
+       Route 1 has calendar-upcoming, create and cancel. Pick one working route (n8n Route
+       1 works today), make the Calendar card show that, and hide the unused one.
+
+    4. Local AI endpoint. The Local AI (gateway) card points at port 1235 while LM Studio
+       normally runs on 1234 and the orchestrator uses 1234. Confirm which is right and use
+       one endpoint everywhere. Set the text model to Tony's model explicitly instead of
+       "First loaded model", so OCR, brainstorm and widget jobs never trigger a second
+       model load.
+
+                                                                                                                                                                                                                                                  Page 17 of 36
+Gabagoul Section-by-Section Pass
+
+    5. Overseer auto-escalate. "Auto-escalate when the local chain fails" is on, which sends
+       conversations to Claude automatically. Turn it off by default (on demand only, as in
+       Section 1), or change it to ask first with a confirmation card. Keep Manual Overseer
+       Mode off.
+
+    6. Maps home. MAP_HOME defaults to Toronto city centre. Let me set my real home or
+       base address in settings (not only in .env), plus saved places like job sites and studios.
+       Note public OSRM has no live traffic; label ETAs as estimates.
+
+    7. Market data. Twelve Data key not set. Once IBKR is connected (Section 14), use IBKR
+       data first, Yahoo as fallback, and Twelve Data only if I add a key.
+
+    8. n8n. n8n is running and healthy in Docker but has no API key saved and no workflows
+       listed. Walk me through creating the API key and the first webhooks (gdrive-sync,
+       calendar, gmail-recent), and show each workflow's status on this card.
+
+    9. Google Drive backup = the off-machine copy. The GDrive sync (every 6 hours and on
+       clean exit) is the off-machine backup from Section 16. Confirm the tracked paths are
+       correct (G:\agentic os\training_logs, memory, brain, os-config), add the pending
+       D:\Art Apps\agentic os\brain path only if it's real, confirm no secrets or .env files are
+       ever uploaded, and verify a sync actually lands in Drive.
+
+  10. Droplet. "Droplet enabled" is on and the top bar shows Hybrid with Droplet
+       connected, routing overflow to Qwen3 0.6B. Per Section 20, default to Local only and
+       keep the droplet for n8n and WhatsApp bridge duties only, not chat.
+
+  11. Bigger scrollbars. The scrollbars on both sides of Settings and other long pages are
+       too thin to grab. Make them wider with a larger hit area, everywhere in the app.
+
+ Section 22: Business settings
+
+    1. Three business profiles. Business details currently hold one profile. Make it one
+       profile per business (Acting, Contracting, BF Supplements) plus Personal, each with:
+       name, address, email, phone, HST/GST number, province/tax rate, currency, logo and
+       invoice template. Invoices and tax views use the matching profile.
+
+    2. Acting commission defaults. In the Acting profile, list my agencies (principal agent
+       plus sub-agents) with default commission rates (15%, 20%, 0% or custom) and union
+       or non-union defaults. Finance pre-fills from here (Section 11, item 19).
+
+    3. Contracting defaults. Default rates for subs and a simple "did it myself / subbed out"
+       default (Section 11, item 20).
+
+    4. HST number check. The current HST/GST number looks like a placeholder. Flag
+       placeholder values and don't print them on invoices until I confirm the real number.
+
+                                                                                                                                                                                                                                                  Page 18 of 36
+Gabagoul Section-by-Section Pass
+
+    5. Keep these details local to my machines only, as the card says.
+
+ Section 23: Appearance
+
+  Keep Ultra Glass, the voice waveform and orb colours, weather location, and identity and
+  mantra. Add:
+
+    1. Text scale. One slider for font size across the app, plus bold and text-shadow strength
+       (Section 6 readability).
+
+    2. Accent colour theme. Pick one accent colour (or the presets like Stitch default and
+       Teal/amber) that every widget, chart, status pill and the three system views use,
+       saved in the shared theme.
+
+    3. Scrollbar size and reduce motion toggles.
+    4. Per-page looks. Each named page can have its own wallpaper, glass opacity and
+
+       accent, saved with the page preset.
+    5. Status line and mantras can rotate or follow Tony's current mode.
+    6. Top bar layout. Choose which status chips show (business, away mode, GPU, compute
+
+       mode, droplet, mode, shield) and hide the rest.
+
+ Section 24: Security
+
+    1. Lock timing explains the frequent logins. The app locks after 15 minutes idle and
+       every 60 minutes regardless, and the audit trail shows many app_start and login
+       entries from restarts. Make both intervals adjustable in this card (within sensible
+       limits), keep sessions across gateway restarts (Section 4), and don't force a re-login
+       on app restart within the window.
+
+    2. Pair the phone companion. Companion shows "not paired". Add a simple pairing flow
+       (QR code on desktop, scan with the phone app) so phone fingerprint approval
+       (Section 4, item 2) works.
+
+    3. Audit trail. Add filters (logins, locks, approvals, trading, settings changes), and alert
+       me on failed logins or unknown devices.
+
+    4. Keep the PIN (Argon2id), the read-only Trading, Finance and Settings with re-
+       verification, and the destructive action gate as they are.
+
+                                                                                                                                                                                                                                                  Page 19 of 36
+Gabagoul Section-by-Section Pass
+
+ Before you start (batch 3: Sections 11 to 24)
+
+    1. Check whether the GPU comparison and the latency work in other chats are finished.
+       Until I confirm, only read code and plan; don't restart services or use the GPU.
+
+    2. Give me a prioritised order for Sections 11 to 24, flagging which depend on the routing
+       and latency fixes, which are quick wins I can do myself in settings (for example
+       pasting keys, renewing the Instagram token, pairing the phone), and effort for each.
+
+    3. Build on the section-pass branch, one section at a time, testing and committing
+       each, and ask before merging into main.
+
+ Section 25: Quick login screen
+
+    1. Keypad PIN entry. The login screen shows a phone-style number pad (large tappable
+       buttons, plus typing digits on the keyboard). Dots fill as I enter the PIN, and it unlocks
+       automatically on the last digit, with no Enter button or text field to click into.
+
+    2. Faster options. Offer Windows Hello (fingerprint or face) on the desktop, and phone
+       fingerprint approval once the companion is paired (Section 4 and Section 24), with
+       the keypad PIN as fallback.
+
+    3. Safety. Keep Argon2id hashing, add a short delay after several wrong attempts, and
+       log failed attempts in the audit trail.
+
+    4. Keep the visual design simple for now; the full UI and branding pass comes later.
+
+ UI pass notes (later, not for now)
+
+       I'll brainstorm the full UI concept separately (Figma, Stitch, Gemini) and bring it back
+       before any UI build.
+       Logo idea: a slice of gabagool (capicola, with its marbled swirl) as the app icon. An
+       E46 wagon outline is the alternative. Both are original, no real-person likeness.
+       Possible future: package Gabagoul as a downloadable personal AI OS template.
+
+ Section 26: Remove AnythingLLM and build the engine in
+
+  Goal: Gabagoul talks straight to the model, with no AnythingLLM layer in between. Fewer
+  hops, fewer things to break, one place to control everything.
+
+                                                                                                                                                                                                                                                  Page 20 of 36
+Gabagoul Section-by-Section Pass
+
+    1. Plan first, don't rip anything out yet. List everything AnythingLLM currently does for
+       me: agent workspaces and their prompts, skills, MCP servers, Gmail and Calendar
+       Apps Script agents, RAG and embeddings, chat history. Show where each will live in
+       the gateway instead.
+
+    2. Move the agents into the gateway. Each agent becomes a prompt, tool list and
+       memory section in Gabagoul's own config, calling the shared model directly. Tools
+       come only from Tony's MCP registry, which already enforces one owner per tool and
+       read-only rules.
+
+    3. Move RAG and the vault. Use the gateway's own vector vault with the nomic
+       embedding model for search, so nothing depends on AnythingLLM workspaces.
+
+    4. Built-in model engine (optional, second step). Have the gateway manage llama.cpp's
+       server directly: start it at boot, load Tony's model, keep it warm, and unload or reload it
+       for ComfyUI and training through the GPU baton. Keep LM Studio installed for
+       downloading and testing models in the Model Lab, but not in Tony's request path.
+       Compare speed against LM Studio before switching.
+
+    5. Migrate safely. Run both side by side behind a switchboard toggle, prove the new
+       path with the test set and stress tests, then switch over. Export AnythingLLM data
+       and keep it until I confirm nothing is missing; uninstall only with my approval.
+
+    6. Phone. The phone keeps talking only to the gateway; confirm it gets faster and
+       simpler, with no AnythingLLM endpoints anywhere in the app.
+
+  Before you start: do this after the routing and latency fixes are merged, on its own branch
+  ( remove-anythingllm ). Plan and report first, ask before deleting anything, and ask
+  before merging into main.
+
+ Later: per-agent trained adapters
+
+  Once the built-in engine works, plan per-agent LoRA adapters: one shared base model in
+  VRAM, with a small trained adapter per agent (Director, Finance, Trader analyst and so
+  on), hot-swapped by llama.cpp per request. Tony can keep the base model or his own
+  adapter. Train adapters overnight in Learning mode from each agent's approved work.
+  Don't load several separate models at once; VRAM is already about 10 GB of 12 GB with
+  Tony loaded.
+
+                                                                                                                                                                                                                                                  Page 21 of 36
+Gabagoul Section-by-Section Pass
+
+ Follow-up to Section 6: Widgets as app icons
+
+    1. Icon mode. Any widget can shrink down to an app-sized icon on the page, like an app
+       on a phone home screen, showing its icon and optionally a small badge or live value
+       (for example unread count or temperature).
+
+    2. Pop-up window. Tapping the icon opens the widget as a floating window over the
+       page, full size and interactive. It can be moved and resized, and closes back to its icon.
+       Several can be open at once.
+
+    3. Switch freely. Each widget can be set to icon, compact or full size, saved per page
+       preset. Works on desktop and phone.
+
+ Follow-up to Section 7: Hold-to-switch navigation
+
+    1. Quick switcher gesture. On the phone (and touch screens), press and hold, then
+       slide up or down through a list or wheel of the app's sections and named pages;
+       release to land there. A light haptic tick as each item passes. Works one-handed with
+       the thumb.
+
+    2. Customisable. I choose which sections appear and their order, matching the
+       customisable side panel (Section 17).
+
+    3. Accessibility. Large targets, readable labels, and a tap-based alternative for anyone
+       who can't hold and slide.
+
+    4. Think phone-first throughout: the phone app is a main way into Gabagoul, not a cut-
+       down copy of the desktop.
+
+ Section 27: Mobile app (phone-first)
+
+  Includes the hold-to-switch navigation and the widgets-as-app-icons follow-ups above.
+    1. Share to Tony. Register Gabagoul in Android's share sheet. Photos, receipts, links,
+       PDFs, scripts and videos shared from any app go to the right place (Finance scan,
+       Scene Reader, Director media bin, idea board), with a quick confirm.
+    2. Smart notifications. Agent reports, trading urgent alerts, pending payments, unpaid
+       commissions and booking emails arrive as phone notifications with quick actions
+       (approve, snooze, open, reply). Approvals still need fingerprint. Per-category on/off.
+    3. Offline mode. If Mortadella is unreachable, the app still works for notes, scans, ideas
+       and cached data; actions queue and sync automatically when back online, with a clear
+       offline indicator.
+
+                                                                                                                                                                                                                                                  Page 22 of 36
+Gabagoul Section-by-Section Pass
+
+    4. Driving mode. Big-button, voice-only screen for the car; Tony reads replies aloud,
+       nothing needs looking at. Android Auto support later.
+
+    5. Location reminders. Optional: arriving at a saved job site shows that job's details;
+       leaving an audition prompts me to log it. Location stays on my devices.
+
+    6. Battery and data saver. On mobile data or low battery, pause heavy features (3D
+       views, live captions, animated wallpapers, auto-downloads) and keep voice and
+       messages working.
+
+ Follow-up to Section 26: What the built-in engine must also cover
+
+  Things AnythingLLM and LM Studio did quietly that the replacement needs:
+    1. Model management screen. Browse, download (single files from Hugging Face,
+       resumable), swap, test and delete models inside the app, showing size and whether
+       each fits in VRAM.
+    2. Chat templates and tool calls. Use the correct chat template and tool-call format per
+       model family (Qwen first). Test tool calling against the Model Lab test set before
+       switching over.
+    3. Embeddings and vision. Serve the embedding model (nomic) for the vault and the
+       vision model for receipt and document OCR, managed by the GPU baton or run on
+       CPU.
+    4. Document handling. The vault ingests PDFs, docs and scripts itself: text extraction,
+       chunking, embedding and re-indexing on change.
+    5. Watchdog. If the engine or a model crashes, the gateway restarts it automatically,
+       reloads Tony's model, and logs it.
+    6. Standard API. Expose an OpenAI-compatible endpoint, so Scene Reader, n8n, the
+       phone and other tools keep working unchanged.
+    7. Settings carried over. Context length, GPU layers, KV cache and prompt-cache
+       settings, plus keeping the model warm, all configurable in the app.
+    7. Future: Gabagoul launcher. Make the phone app able to act as my Android home
+       screen (a launcher I can set as the default home app, like Niagara or Nova). It shows
+       my named pages, widgets, app icons and Tony, with a Niagara-style one-handed list
+       where I slide my thumb to jump to apps and sections (combined with hold-to-switch).
+       Includes a normal app drawer for all my phone's apps, so it fully replaces the stock
+       home screen. Easy to switch back to Samsung's launcher. Build after the main mobile
+       app is stable.
+
+                                                                                                                                                                                                                                                  Page 23 of 36
+Gabagoul Section-by-Section Pass
+
+ Section 28: Gabagool coins (rewards Easter egg)
+
+  A motivation feedback loop tied to my real progress and a guilt-free personal fund.
+    1. Earn coins. When I tell Tony I've finished something (a task, workout, audition, job,
+       invoice sent, lines learned, a good day), I earn gabagool coins. Streaks and milestones
+       give power-ups and bonus coins. I can set what earns coins and how many.
+    2. "Just for me" fund. In Finance, a small percentage of each income payment (I set it) is
+       automatically earmarked as personal reward money, shown separately from bills and
+       goals.
+    3. Coins unlock the fund. Coins convert into how much of that fund I can spend on
+       myself. Spending is logged in Finance like any other expense.
+    4. Points only. Coins are in-app points, never real money, crypto or tokens, and can't be
+       bought or transferred. Anyone using the app can rename the currency.
+    5. Mascot. An original mascot (for example a cheeky slice of gabagool with a face),
+       designed with ComfyUI by the Designer, that reacts to progress, levels up and
+       celebrates streaks. No real-person likeness.
+    6. Healthy by design. Rewards only, no penalties, guilt or losing coins. Easy to pause or
+       turn off.
+    7. Easter egg. Hidden until discovered (for example a secret phrase to Tony or inside
+       Gabagool mode), then lives as a widget and in Finance.
+    8. Teaser. For new users, Finance shows a small "Gabagool coins: 0" with no explanation.
+       The first time they complete something, the mascot pops up, awards their first coins
+       and reveals how it works. For me, a simple on/off toggle in settings.
+
+ 7B: Movable layouts on every page (SENT with the widget
+ builder, step 8)
+
+  Extend the homepage grid and widget system to every page in the app, not just the
+  homepage.
+
+    1. Every page uses the same grid. Every panel, card and widget can be dragged, resized,
+       hidden or added back.
+
+    2. Each page has an Edit layout mode (or a long-press), using the same controls as the
+       homepage.
+
+    3. Each page's layout is saved per page and per mode preset, and syncs to the phone
+       build where the screen allows.
+
+                                                                                                                                                                                                                                                  Page 24 of 36
+Gabagoul Section-by-Section Pass
+
+    4. Every page has a Reset to default button.
+    5. Build it once as a shared layout component that every page uses. Don't build a
+
+       separate one for each page.
+    6. Safety-critical controls stay visible and can't be hidden: the trading kill switch and
+
+       Tony's stop or interrupt.
+  Window options for every panel: snap to the grid or place freely, any size, pop out as its
+  own clickable window, pin always on top or show on demand, and collapse to an icon.
+  These are saved per preset.
+  Before you start: check the hold-to-switch follow-up for Section 7 and the widgets-as-
+  app-icons follow-up for Section 6, so all three share one layout system. Commit on
+  section-pass and update STATUS.md.
+
+ App-wide rule: everything is customizable (SENT with the widget
+ builder, step 8)
+
+  Every page should look like a finished, fixed template out of the box, but underneath it's
+  fully customizable. This applies to every section, including Brainstorming, Comms,
+  Finance, Trading, Director, Scene Reader and the homepage.
+
+    1. Layout: panels and widgets can be moved, resized, hidden and added (see 7B).
+    2. Content: sections, fields, categories, tags and lists can be renamed, added or
+
+       removed. Nothing user-facing is hard-coded.
+    3. Look: theme, colours, fonts, density and icons are set app-wide, with per-page
+
+       overrides.
+    4. Behaviour: defaults, shortcuts, agent voices and mode presets are set in Settings, not
+
+       in code.
+    5. Brainstorming: templates, stages and wrap-up formats can be edited or swapped out.
+    6. A default template plus Reset to default on every page, so nothing can get
+
+       permanently broken.
+    7. Saved layouts and setups can be exported and imported, ready for the downloadable
+
+       Gabagoul template later.
+    8. Safety controls (the kill switch, Tony's stop, send confirmations) can't be removed.
+  Appearance page = the control centre. Every visual setting has a control in Settings 
+  Appearance: colours, accents, glass and blur, box and card styles, borders, corner radius,
+  shadows, fonts and sizes, spacing and density, icons, widget styles and animations. Each
+
+                                                                                                                                                                                                                                                  Page 25 of 36
+Gabagoul Section-by-Section Pass
+
+  one has a live preview, app-wide values with per-page overrides, saved themes, and Reset
+  to default. If something can be styled, it shows up here. No visual setting should be hidden
+  in code.
+
+  Before you start: apply this as a standing rule for all future sections. For sections already
+  built, list what's still hard-coded and fix it one section at a time. Add the rule to
+  AGENTS.md, commit on section-pass and update STATUS.md.
+
+ Section 29: Signatures and ID vault in Business (NOT SENT YET)
+
+  Add a Signatures and IDs area under Settings  Business, so digital copies are always one
+  click away.
+
+    1. Signatures: draw, type or upload a full signature and initials. Save several versions and
+       insert them into PDFs, contracts, invoices and email signatures.
+
+    2. ID vault: store scans of the driver's licence, passport, SIN or work permit, union cards
+       (ACTRA), health card (OHIP), insurance cards (car, health, liability), and business
+       registration. Custom categories can be added for anything else (including the HST
+       number). Each entry gets front and back images, an expiry date and an expiry
+       reminder.
+
+    3. Security first: everything is encrypted at rest. Opening the vault takes the keypad
+       PIN or step-up. It locks again after a short idle timeout, and every view, export or copy
+       goes in an access log.
+
+    4. Never sent to models: vault files are never passed to Tony, other agents, cloud models
+       or n8n, and never go into the AnythingLLM or llama.cpp memory. Agents can only see
+       that a document exists and when it expires.
+
+    5. Sharing copies: export a watermarked copy ("For [purpose] only, [date]") as a PDF or
+       image. Nothing goes out without the confirmation card.
+
+    6. Phone: desktop-only by default. If it's turned on, the phone gets a view-only, PIN-
+       locked view with no offline cache.
+
+    7. Google Wallet: there's no proper way for the app to read cards from Google Wallet, so
+       add an "Open Google Wallet" shortcut instead of copying cards in.
+
+    8. Backups: the vault is included in versioned backups, encrypted. Never put it in a plain
+       Google Drive copy.
+
+  Load on demand, then clear: vault files stay encrypted on their storage location (for
+  example an encrypted folder or the backup drive). They're decrypted in memory only
+  while being viewed, never written to temp folders, caches or thumbnails, and wiped from
+
+                                                                                                                                                                                                                                                  Page 26 of 36
+Gabagoul Section-by-Section Pass
+
+  memory when the vault locks or the view closes.
+  Before you start: confirm the encryption approach and the PIN gating with me before
+  storing any real documents. Test only with fake sample IDs. Commit on section-pass and
+  update STATUS.md.
+
+ 27B: Launcher presets and outside apps (NOT SENT YET)
+
+  The phone launcher and scroll wheel get switchable presets.
+    1. Clean preset: Gabagoul pages and widgets only, with no outside apps.
+    2. Full preset: outside apps sit in the same scroll wheel, but in their own clearly separate
+       group (for example below a divider or on a separate ring), never mixed in with
+       Gabagoul items.
+    3. Outside apps open through Android's normal app launch. Gabagoul doesn't embed or
+       run them.
+    4. Shortcut to wallet: one tap opens Google Wallet or Samsung Wallet for tap-to-pay. No
+       card data is stored in Gabagoul.
+    5. Presets can be switched from the overlay and tied to modes (for example, Work mode
+       uses Clean). They follow the app-wide customization rule.
+
+  Quick-launch gestures: support a deep link or app shortcut for each target so phone
+  gestures can open them directly: Tony voice (back double-tap via Good Lock RegiStar, or
+  side key double-press) and Language Hub live translate (back triple-tap). Each opens
+  straight into listening mode, with no menus.
+  Two-way auto language: in Language Hub conversation mode, detect the spoken
+  language on each turn (Whisper language detection) and translate automatically in the
+  right direction. Nic's language goes to the other person's, and theirs comes back to his,
+  with no manual switching. A manual override stays available for mixed or unclear speech.
+  Who speaks first: if the other person speaks first, their language is detected and locks
+  the pair. If Nic speaks first, translate into a default target: the last-used language, or one
+  set in a quick preset (for example a pinned list of favourite languages). Correct it
+  automatically as soon as the other person replies in a different language. Nic can also say
+  the language at the start (for example "Spanish: where's the station?" or "Italian, ..."). The
+  keyword sets the target instantly and is stripped from what gets translated. A "Speak
+  [language]" command ("Speak Polish", "Speak English") works the same way: it switches
+
+                                                                                                                                                                                                                                                  Page 27 of 36
+Gabagoul Section-by-Section Pass
+
+  the target at once, the rest of the sentence is translated, and it stays on that language
+  until another "Speak ..." command. Handle it as a tiny local command check before
+  translation, with no extra model call.
+  Before you start: build this on top of Section 27 and the hold-to-switch navigation.
+  Commit on section-pass and update STATUS.md.
+
+ Section 30: Car mode (PARKED UNTIL SPRING, DON'T SEND)
+
+  A stripped-down, voice-first preset for driving. Nothing runs on the car itself. The phone is
+  the interface and Mortadella does the work.
+
+    1. Tony routes everything by voice: ideas, notes, language practice, messages and
+       bookings all go through Tony, and he sorts them into the right page for later.
+
+    2. Read-only views only: big, glanceable cards. No typing, no editing and no scrolling
+       lists while moving.
+
+    3. Trading is locked: no orders in car mode. The kill switch is the only trading control.
+    4. Sending: calls and texts still need a spoken confirmation ("send it") before anything
+
+       goes out.
+    5. Mortadella status page: GPU, VRAM, CPU, RAM, temperatures, which models are
+
+       loaded, running jobs (like ComfyUI renders), and NetBird connection status (direct or
+       relay).
+    6. Turns on automatically when the phone connects to the car's Bluetooth, and can also
+       be switched on from the overlay.
+    7. Display: works on the phone in a mount. Android Auto support comes later, if a head
+       unit is added to the E46.
+  Same app, trimmed down: car mode uses the same layouts and widgets as the phone, so
+  it can receive widget and UI updates. The widget builder and heavy editing tools don't run
+  there, because car mode isn't built for that.
+  Before you start: build on the mode presets and Section 27. Commit on section-pass and
+  update STATUS.md.
+
+ 27C: Phone offline mode (NOT SENT YET)
+
+  When the phone can't reach Mortadella, it keeps working instead of going dead.
+
+                                                                                                                                                                                                                                                  Page 28 of 36
+Gabagoul Section-by-Section Pass
+
+    1. Small on-device model: a small model runs on the phone for basics like notes,
+       reminders, quick questions and drafting messages.
+
+    2. Queue and sync: anything bigger (trading, Director, Comms sends, long tasks) gets
+       queued and sent to Mortadella automatically once the connection comes back.
+
+    3. Cached read-only views: the last-synced homepage, calendar, contacts and status
+       stay viewable offline. The ID vault never caches.
+
+    4. Clear status: an offline badge shows what's queued and when it last synced.
+    5. Safety: no trades and no outgoing calls or texts are sent automatically from the queue
+
+       without the confirmation card.
+  Before you start: build after Section 26 (built-in engine) so the phone model uses the
+  same engine. Commit on section-pass and update STATUS.md.
+
+ Tony + Finance: approval tiers (NOT SENT YET)
+
+  Tony can act on Finance, but how much he can do on his own depends on what's at stake.
+    1. Small (auto + undo): logging receipts, categorizing, tagging, adding notes. Tony does
+       it and shows an undo toast.
+    2. Bigger (ask first): editing totals, deleting entries, creating or changing invoices. Tony
+       shows a confirmation card first.
+    3. Money out or filings (always approve): payments, transfers, sending invoices,
+       anything tax or HST related. Always needs explicit approval, every time.
+    4. All Tony edits go into a Finance change log. Tiers are adjustable in Settings, but tier 3
+       can't be lowered.
+
+ Curator pass (later)
+
+  Once the build settles, treat this doc as the master doc. One curator session goes through
+  it top to bottom, checks every section against the code and STATUS.md, marks what's
+  done, and lists what's missing or duplicated.
+
+ Section 31: App-builder playbook (FUTURE, DON'T SEND YET)
+
+  Turn the Gabagoul build itself into a template that teaches agents how to build apps.
+
+                                                                                                                                                                                                                                                  Page 29 of 36
+Gabagoul Section-by-Section Pass
+
+    1. Collect the history: section prompts, STATUS.md snapshots, AGENTS.md rules,
+       commit messages, review findings (like the kill-switch race) and the fixes that
+       followed.
+
+    2. Write the playbook: the working rules, such as small sections, a "Before you start"
+       note on each batch, one branch per area, tag main before big merges, the 80-second
+       test run before commits, safety controls locked, and everything customizable.
+
+    3. Training data: use the cleaned history as examples for a builder agent's LoRA adapter
+       (after Section 26).
+
+    4. Starter kit: a blank project with AGENTS.md, a STATUS.md template, the test runner
+       and the shared layout system, ready for a new app.
+
+    5. Strip out private data (finances, IDs, contacts, keys) before anything is used for
+       training or shared.
+
+  Before you start: wait until the current build is merged and the curator pass is done.
+
+ Section 32: Trading bird's-eye chart workspace (NOT SENT YET)
+
+  A trading view built big picture first, then down into the detail, instead of separate charts
+  scattered everywhere.
+  Already built: the Supply / Demand & POC chart (POC, value area, zones, bins) exists, but
+  it sits at the bottom of the Trading page. Move it to the top, side by side with the main
+  price chart, and link the two. Reuse the existing chart. Don't rebuild it. Switch its data
+  from Yahoo Finance (unofficial, may be delayed) to the IBKR feed, keeping Yahoo only as a
+  labelled fallback.
+
+    1. Linked views side by side: a supply and demand zones chart and a volume profile
+       chart (point of control, value area) next to each other, with the regular price chart
+       directly below. All three share one time axis and scroll and zoom together, like carbon
+       copies.
+
+    2. Zoom from macro to micro: start with the bird's-eye view (weeks or months) to find
+       the pattern, then zoom into hours and minutes for the execution plan. A data range
+       control sets how much history shows.
+
+    3. Custom tables per instrument: build tables with exactly the fields needed for what's
+       being traded (SPY, options, futures), saved as presets and switched with one click.
+
+    4. Engine R overlay: Engine R's signals, entries, stops and fills can be shown on the
+       charts, toggled on or off.
+
+                                                                                                                                                                                                                                                  Page 30 of 36
+Gabagoul Section-by-Section Pass
+
+    5. Saved workspaces: layouts are saved per strategy and follow the shared layout
+       system and customization rule. The kill switch stays visible on every trading
+       workspace.
+
+    6. Data: pull price and volume data through the existing IBKR connection. Only read-
+       only charting here, no new order paths.
+
+  Auto vs manual charts: the main workspace charts draw zones, POC, value area and levels
+  automatically. A separate "Drawing" chart is for Nic's own lines and annotations, so manual
+  drawings never clutter the auto charts. One screen, all tickers: switch tickers in place
+  (watchlist tabs or a quick picker). Each ticker remembers its own zones, drawings and
+  table preset, with no separate window per ticker.
+  Three linked charts, click to load: the workspace has just three stacked charts that
+  always show the same ticker. (1) Clean price chart with no overlays. (2) Custom chart with
+  POC, value area and supply/demand zones. (3) Drawing chart for manual lines. Clicking
+  any position, order or watchlist row loads that ticker into all three at once, so there's no
+  cross-referencing between separate windows.
+
+  Link toggle: each chart has a ticker picker in its corner (for example "SPY"), so the charts
+  can show different tickers independently. A Link button syncs them: clicking it makes all
+  three follow the ticker, timeframe and zoom of the chart it was pressed on. Unlinking lets
+  them go independent again. Layout: the IBKR price chart and the POC chart side by side,
+  with the drawing chart available alongside, all movable with the shared layout system.
+  Watchlist playlists by market regime: named, reorderable watchlists ("playlists") of
+  tickers to run, for example Bull, Bear, Choppy, Commodities, ETFs, Bonds. Each playlist
+  can carry its own chart and table presets. Switching playlists swaps the ticker list and
+  linked charts in one click. Optionally Engine R suggests which playlist fits the current
+  regime (trend and volatility), read-only, with Nic choosing.
+
+  Before you start: build on the shared layout system from the widget builder step. Run the
+  trading tests before committing, commit on its own branch and update STATUS.md.
+
+ Section 33: Tony vision, "point and ask" (NOT SENT YET)
+
+  Give Tony eyes: a local vision model plus a "look" tool that takes a camera frame or
+  screenshot and answers about it.
+
+    1. Model: a local vision-language model (for example Qwen VL) loaded through the
+       built-in engine. It loads on demand and unloads when idle so Tony's voice model keeps
+       its memory.
+
+                                                                                                                                                                                                                                                  Page 31 of 36
+Gabagoul Section-by-Section Pass
+
+    2. Inputs: phone camera (a quick snap from the overlay or a gesture), desktop
+       screenshots, and images already in the app.
+
+    3. Uses:
+             Language Hub: read a sign, menu or document and translate it.
+             Finance: snap a receipt and log it (follows the Finance approval tiers).
+             Masonry: photograph a wall or job site for a rough measurement and quote draft.
+             Scene Reader: photograph script pages and load them as a script.
+             Trading: read a chart screenshot. Read-only, never places orders.
+
+    4. Privacy: images stay local, are never sent to cloud models, and are deleted after use
+       unless saved. The ID vault is never opened by vision.
+
+    5. Hardware: works on the 3060 by swapping models in and out. With a second GPU or a
+       3090, the vision model can stay loaded.
+
+  Before you start: build after Section 26 (built-in engine). Commit on its own branch and
+  update STATUS.md.
+
+ Tony latency: cached stats + Development mode (NOT SENT
+ YET)
+
+    1. Cached stats: a background job refreshes system stats (CPU, GPU, VRAM,
+       temperatures, network, weather) every few seconds. Tony reads the latest cached
+       values instead of making a live lookup on every turn. Target: casual replies under 2 s to
+       the first word (currently about 3.5 s).
+
+    2. Development mode preset: in Dev mode, Tony mentions system stats, timings and
+       debug info. In normal modes he skips stats unless asked. This is a mode toggle, not a
+       removal, so nothing is cut out.
+
+    3. Simple greetings skip tool calls entirely.
+  Before you start: measure before and after with the latency test. Commit and update
+  STATUS.md.
+
+ Droplet control + system snapshot report (NOT SENT YET)
+
+    1. Droplet actions in tiers: status checks are automatic (the read-only tool already in
+       progress). Restarting a service (n8n, Docker containers, NetBird) needs a
+       confirmation card. Destructive actions (wipe, resize, firewall changes, deleting
+       volumes) are never done by Tony. Nic does those manually.
+
+                                                                                                                                                                                                                                                  Page 32 of 36
+Gabagoul Section-by-Section Pass
+
+    2. System snapshots: every few minutes, save a small rolling snapshot of Mortadella,
+       the droplet and the phone link: services up or down, loaded models, VRAM, CPU,
+       temperatures, network path, last errors, and running jobs.
+
+    3. What-happened report: after a crash, a power cut, an unexpected restart or a lost
+       connection, the first screen at the next login (or Tony's first message) is a short
+       report. It says what went down and when, the last snapshot before it, what the panic
+       log or crash log says, what recovered on its own, and anything that still needs Nic.
+
+    4. Reports are kept in a history list. Dev mode shows the full detail, and normal mode
+       shows a one-line summary with a details button.
+
+  Triggered on reconnect too: the report also shows the first time Tony is reachable again
+  after the phone or app couldn't reach him or the droplet. It lists every connector (n8n,
+  Gmail, Instagram, IBKR/TWS, NetBird, LM Studio or the engine, ComfyUI, ElevenLabs,
+  Whisper) with its state, tries to reconnect the dropped ones automatically, and shows
+  only what still needs Nic, so nothing has to be chased one by one.
+  Before you start: build on the crash log + safer restart work and the droplet status tool.
+  Commit and update STATUS.md.
+
+ Orchestrator prompt (SEND AFTER THE MONDAY RESET,
+ WHEN CURRENT WORK IS MERGED)
+
+  You are the orchestrator for the Gabagoul Command Center build. Don't write feature
+  code yourself. Plan, delegate, check and report.
+
+    1. Wait first: don't start until every in-progress branch in STATUS.md is merged or
+       parked, and main is green on the full test run. If something is still running, check back
+       later instead of starting.
+
+    2. Tag main as a known-good version before handing anything out.
+    3. Read the master list: the section-pass doc (sections tagged NOT SENT YET, plus
+
+       anything STATUS.md lists as not started) and STATUS.md. Skip anything tagged Sent,
+       Future or Parked.
+    4. Order the work: UI and layout sections first, then Section 29 (ID vault), 27B, the
+       Finance approval tiers, then Section 26 (built-in engine) on its own branch, then 27C
+       (phone offline, after the engine).
+    5. Delegate: one worker session per area, one branch per area, never two workers on the
+       same files. Each worker gets its section text plus that batch's "Before you start" note.
+
+                                                                                                                                                                                                                                                  Page 33 of 36
+Gabagoul Section-by-Section Pass
+
+    6. Gate every merge: the full test run must pass, conflicts get resolved carefully, merge
+       one branch at a time, and update STATUS.md after each one.
+
+    7. Stop and ask Nic before: anything touching trading or money, storing real ID
+       documents, Section 26 engine cutover, deleting agents or data, or any change to
+       safety controls (kill switch, Tony's stop, send confirmations).
+
+    8. Usage: work in sensible chunks. If usage limits get close, finish the current step
+       cleanly, commit, update STATUS.md and pause.
+
+    9. Report: after each merge, post a short summary saying what landed, test results, and
+       what's waiting on Nic.
+
+  When everything in the list is merged, run the curator pass: check every section in the
+  doc against the code and STATUS.md, and list what's done, missing or duplicated.
+
+ UI fixes (FUTURE, after the rest of the build is done)
+
+    1. Sub-pages for every section. Like the home page's named pages, any section
+       (Comms, Finance, Trading and so on) can have extra pages if Nic wants them, for
+       example Comms "Calls" and Comms "Business messages". Each sub-page has its own
+       panels and layout, uses the shared layout system and Add panel, and Nic swipes or
+       tabs between them. Optional: a section keeps a single page unless Nic adds more.
+
+    2. Live, pop-up widgets and characters. Some widgets aren't boxes at all: small
+       animated characters or objects that float over the screen, stay subtle at rest (a tiny
+       idle animation, tucked in a corner), then pop up when something happens or when
+       tapped, react, and tuck away again. Think the old desktop-assistant style of
+       interaction, but original designs. Builds on frameless widgets (Section 6, item 11), pop-
+       out and always-on-top windows (7B) and the gabagool mascot (Section 28): the coins
+       mascot is the first one, popping up on streaks and rewards. Fixes needed too: the
+       fortune cookie's crack animation looks off. Rules: never blocks clicks or covers safety
+       controls, easy to mute or hide, reduce-motion respected, frequency adjustable.
+
+    3. Master UI pass. Nic will bring a Gemini screen-recording review of every page. Merge
+       it with the items above into one batch of UI fixes, split by area.
+
+    4. Play Place steers back. The builder is a creative partner, not just an order-taker. From
+       a rough idea it works out which kind of build it is and suggests it: (a) novelty, a live
+       character in the overlay layer; (b) functional, a widget on a page; (c) standalone, its
+       own app outside Gabagoul (Section 5, item 15). Before building, it asks a few sharp
+
+                                                                                                                                                                                                                                                  Page 34 of 36
+Gabagoul Section-by-Section Pass
+
+       questions and pitches ideas ("this would work better as a pop-up character, want
+       that?"), using the taste profile. Goal: fluid, intuitive and seamless, so Nic describes the
+       feeling and the builder fills in the rest.
+
+ Tony call screening (FUTURE)
+
+  Tony screens unknown callers on the phone, always saying up front that he's an AI
+  assistant (for example "Hi, this is Tony, Nic's AI assistant. Nic's busy right now. Who's
+  calling and how can I help?"). He picks up, asks who's calling and why, and shows Nic a live
+  transcript with options: take it, send to voicemail, or block. Known contacts from the
+  phone book ring through as normal. Obvious scams (recorded messages, parcel or
+  embassy scripts) get blocked and logged. Agents and casting numbers are never blocked.
+  Builds on the phone app and the phone bridge (Sections 8, 12 and 27). Check what
+  Android allows (call screening service) and use Tony's local voice, never sending call audio
+  to the cloud.
+  Personal greetings: Nic can set a custom greeting per contact or group (agents, family,
+  clients, subs), for example "Hey Ma, Nic's on set, want me to tell him to call you back?".
+  Saved contacts get their greeting and are pushed straight to Nic with a notification saying
+  who it is, while unknown numbers go through screening. Greetings are editable in the
+  phone book.
+
+ Learned instant cues (NOT SENT YET)
+
+  Builds on the instant cues fast path (Section 20, item 10). Tony learns Nic's everyday
+  phrases instead of needing them programmed.
+
+    1. Watch the patterns: log which spoken phrases lead to which action (locally only).
+       When a phrase reliably leads to the same action several times, Tony suggests making
+       it instant, for example "You say 'what's the damage' every morning for Finance. Want
+       that instant?"
+
+    2. Approve once: a yes saves it as a cue that skips the model from then on. Variations of
+       the same phrase are matched too.
+
+    3. Style library: cues, Nic's slang and nicknames, and preferred reply styles build into
+       one personal library, viewable and editable in Settings, with undo and Reset.
+
+    4. Safety: cues never send messages, move money or trade without the usual
+       confirmation card. Anything unclear falls back to the full model.
+
+    5. Measure: show how many turns were answered by cues and the time saved.
+
+                                                                                                                                                                                                                                                  Page 35 of 36
+Gabagoul Section-by-Section Pass
+
+ Remote power: Wake-on-LAN and remote start (FUTURE)
+
+  Mortadella can be turned on from anywhere and comes back by itself after a power cut.
+    1. BIOS (ASUS B450-F, Nic does this): enable Wake-on-LAN ("Power On By PCI-E") and
+       set "Restore on AC Power Loss" to Power On. Update the 2019 BIOS first. Turn off
+       Windows Fast Startup and allow the network adapter to wake the PC.
+    2. Waker on the home network: the wake packet must come from inside the LAN. The
+       spare S22 on Wi-Fi (or the router) sends it, triggered from Nic's phone over NetBird
+       with a "Wake Mortadella" button.
+    3. Boot chain: after power-on, Windows auto-login, then the gateway, Tony's model or
+       engine, IB Gateway/TWS and the other core services start by themselves, and the
+       system snapshot report says what came up.
+    4. Safety: wake and status are fine remotely. Remote shutdown or restart needs a
+       confirmation card, and trading stays in its current mode.
+
+ Backup drives and recovery (FUTURE, one of the last steps; keep
+ at the very bottom)
+
+    1. 2TB Slim = main backup. Holds regular verified backups plus a full system image of C:
+       (for example Macrium Reflect) every so often, so a dead machine can be restored, not
+       just files. Skip the models on D:, since they can be downloaded again. Check how
+       much is used on C: and G: first to confirm it fits.
+
+    2. 1TB from the old Inspiron 15 = cold storage. In a SATA-to-USB enclosure. Only the
+       irreplaceable stuff: the repo, Finance, memory and brain, and the ID vault (encrypted).
+       Kept unplugged, ideally away from the desk.
+
+    3. Prompted, not forgotten. Gabagoul reminds Nic on a schedule and after a purge.
+       When a known backup drive is plugged in, it runs the backup, verifies size and
+       contents, shows the result, and says when it's safe to unplug.
+
+    4. Unplugged means safe from power surges and ransomware. Ties into Section 16
+       (second backup destination) and the Google Drive off-machine copy.
+
+                                                                                                                                                                                                                                                  Page 36 of 36
+

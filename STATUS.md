@@ -1,6 +1,6 @@
 # STATUS
 
-Updated 2026-11-27 18:07. One page for every Claude Code session and branch.
+Updated 2026-11-27 19:20. One page for every Claude Code session and branch.
 **Rule for every session:** after each commit or merge, update the sections below and run `python scripts/update_status.py` (refreshes the branch table at the bottom).
 
 ## 1. Done
@@ -98,7 +98,6 @@ Updated 2026-11-27 18:07. One page for every Claude Code session and branch.
 - section-pass converted Comms and Operations to the shared layout. The Communications/brainstorming and Remove-Ops sessions also touch those pages: expect merge conflicts in `CommsSection.tsx` / `OperationsSection.tsx`; Brainstorm and Director were left alone for them.
 - section-pass (now in main): fortune-cookie rerun wanted LATER (Nic, 11-27): when you say go, rebuild main, restart the app on it, then you send Fix on the Fortune cookie tile (Tony in Builder).
 - section-pass, parked for you: (1) native pop-out windows for panels (need a section-pass app build to test); (2) Section 7 hold-to-switch on Tony's button (that button is also Tony's stop, a safety control: your call how it should work); (3) Play Place redesign (Section 5: you asked to see the plan first); (4) Brainstorm and Director pages on the shared layout (other sessions own them).
-- Push main (overnight batch merged, not pushed)?
 - Parked overnight (safety or hardware): 14.5 Full auto gate (PIN + phone approval, live-trading control), 14.8 IBKR data everywhere, 14.9; 15.2 camera translate (phone), 15.3 pronunciation (GPU Whisper), 15.4 accents (Scene Reader), 15.7 vocabulary images (ComfyUI); 16.3 recovery key (would change the vault encryption); wiring language curveballs into Tony's turn.
 - Instant cues: "what's pending" deliberately stays Tony's Finance read (live data); only reminders / to-do are instant.
 - Tony live-test fixes (all 7, merged into main 11-27 on your go). Choices I made overnight (safest option each time):
@@ -162,16 +161,15 @@ Updated 2026-11-27 18:07. One page for every Claude Code session and branch.
 
 ## 4. Not started
 
-**Section-by-Section Pass**
-- 5 rest: builder checklist, fortune-cookie test, style kit, Play Place redesign
-- 6 Home + widget edit mode
+**Section-by-Section Pass** (master list: `docs/gabagoul-section-by-section-pass.pdf`, text copy `.txt` beside it; next up are the sections tagged NOT SENT YET)
+- 5 rest: Play Place redesign (builder checklist, style kit and the fortune-cookie run are done, in main f555484)
 - 7 Phone quick access to Tony (needs Android build)
 - 8: native Android bridge, notification capture, tabs UI, official Meta API, taint/injection guards
 - 9: Talk-it-through mode, send-to after wrap-up, one-tap mode switch, E46 clock build
 - 10.4 Maps: phone "Open in Maps" (Android NavPlugin), hand-off listener wiring, location permission (widget UI done overnight, local branch)
 - 14.5, 14.8, 14.9 Trading (parked: safety / needs IBKR)
 - 15.2, 15.3, 15.4, 15.7 Language (parked: phone, GPU, Scene Reader)
-- 17 Wallpapers, 18 Flowchart/Blueprint/Orbital, 23 Appearance (held until Section 6)
+- 17 Wallpapers, 18 Flowchart/Blueprint/Orbital (were held until Section 6, which is done; both pages are already on the shared layout)
 - 21 setup walkthroughs: Instagram reconnect + expiry, n8n key and webhooks, Maps home in settings, Calendar route pick
 
 Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S20.10, and the Tony-Rust parts of 8 and 9.
@@ -251,14 +249,15 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-27 18:08 by `python scripts/update_status.py`._
+_Refreshed 2026-11-27 19:15 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `section-26-engine` | 65 | `2b44e0f` 2026-11-27 feat(tony): latency fast path behind fastpath.json (all OFF): small... | 1 files |
-| `claude/phone-apk-agentic-os-764f34` | 27 | `4866634` 2026-11-27 docs(status): section-pass merged into main (f555484) and pushed | 1 files |
+| `section-26-engine` | 67 | `913cef7` 2026-11-27 feat(engine): engine sidecar + engine_call so the Engine / Models s... | 1 files |
+| `claude/gabagoul-section-status-225cdd` | 28 | `bedc23c` 2026-11-27 docs(status): phone APK rebuilt from main 4866634 and installed on ... | 3 files |
+| `claude/phone-apk-agentic-os-764f34` | 28 | `bedc23c` 2026-11-27 docs(status): phone APK rebuilt from main 4866634 and installed on ... | clean |
 | `feat/language-hub` | 27 | `4866634` 2026-11-27 docs(status): section-pass merged into main (f555484) and pushed | clean |
 | `section-pass` | 25 | `f8ce963` 2026-11-27 Merge main (8bb443a: kill switch + options guard) into section-pass | no worktree |
 | `claude/upbeat-wing-e87be0` | 11 | `5ca67c0` 2026-11-27 Merge main (196b2f8: Sections 8-10 PR #10) into claude/upbeat-wing-... | no worktree |

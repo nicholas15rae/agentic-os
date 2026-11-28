@@ -32,6 +32,7 @@ const SOLO_BUILD_HINT = "Solo mode: switch modes to build";
 const useSoloMode = () => useModes((s) => s.effective.dispatch === "surface_only");
 
 /** P6 Dev Fix · Claude Queue: the System Map's dev-queue store, loaded only when the tab opens. */
+const SteerModal = lazy(() => import("@/features/steer/SteerModal").then((m) => ({ default: m.SteerModal })));
 const DevFixQueue = lazy(() => import("@/features/memmap/DevFixQueue").then((m) => ({ default: m.DevFixQueue })));
 type LedgerTab = "ideas" | "fixes";
 
@@ -483,7 +484,10 @@ export function IdeasLedger({ compact = false }: { compact?: boolean }) {
   return (
     <Card title="Ideas & tasks ledger" action={tabs} hint={hint}>
       {tab === "ideas" ? (
-        <IdeasList compact={compact} />
+        <>
+          <ShapeIdeaButton />
+          <IdeasList compact={compact} />
+        </>
       ) : !isTauri() ? (
         <Empty>{devFixMode(false).message}</Empty>
       ) : (
@@ -492,6 +496,25 @@ export function IdeasLedger({ compact = false }: { compact?: boolean }) {
         </Suspense>
       )}
     </Card>
+  );
+}
+
+/** UI fixes 4: start a new idea with Play Place steering (kind, pitch, a few questions, then the card). */
+function ShapeIdeaButton() {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button onClick={() => setOpen(true)} className="pill-glass mb-2 !h-8 w-full !px-3 fs-12" title="Describe a rough idea; Play Place suggests a character, a widget or its own app, asks a few questions, then builds on your yes">
+        <Sparkles size={12} className="text-amber-soft" /> Shape a new idea
+      </button>
+      {open &&
+        createPortal(
+          <Suspense fallback={null}>
+            <SteerModal onClose={() => setOpen(false)} />
+          </Suspense>,
+          document.body,
+        )}
+    </>
   );
 }
 

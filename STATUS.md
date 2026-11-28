@@ -1,6 +1,6 @@
 # STATUS
 
-Updated 2026-11-27 18:30. One page for every Claude Code session and branch.
+Updated 2026-11-27 19:05. One page for every Claude Code session and branch.
 **Rule for every session:** after each commit or merge, update the sections below and run `python scripts/update_status.py` (refreshes the branch table at the bottom).
 
 ## HANDOFF: Section 26 engine (branch `section-26-engine`, worktree `G:\agentic-os-engine`), updated 11-27 18:30
@@ -11,7 +11,9 @@ For the next session (Claude Ultra, Monday). Nothing is merged into main or push
 
 **Switches, all false:** `engine.json` (`enabled`, `route_tony`, `route_agents`) and `fastpath.json` (`smallTalkSkipsTools`, `instantCues`, `statsCache`), both beside providers.json. Turning any on is Nic's call.
 
-**The live gateway still runs from `G:\agentic os` (feat/language-hub), not this branch.** So in the rebuilt app, the switches, indicators and Fast replies card work (they're the desktop's own), but the Engine / Models model list, Load, Test reply and Last benchmark say "Engine routes not reachable" until the gateway runs this branch's code (after a merge, or started from the worktree). Turning the engine on also needs that gateway, because the gateway starts llama-server.
+**Gateway vs engine routes (19:05):** the real gateway (:8080) still runs `G:\agentic os` (feat/language-hub 4866634, launched by the app from providers.json `gateway.workdir`). It is NOT moved to the worktree: its store, `.env`, backups and audit live in that folder. The engine routes run from the worktree as a loopback **sidecar on 127.0.0.1:8081** (`python -m engine.serve`; after a reboot run `scripts\start-engine-sidecar.ps1`). The app's Engine / Models screen reaches them through Rust `engine_call` (gateway first, sidecar on a 404). App rebuilt + restarted 19:00 (pid 4032).
+
+**Engine live (19:00):** `engine.json` enabled=true (Nic's go-ahead to load), **route_tony=false, route_agents=false**. Tony's `D:\LM Studio\lmstudio-community\Qwen3.5-9B-GGUF\Qwen3.5-9B-Q4_K_M.gguf` loaded on the engine in 35 s (VRAM 9.5 / 12 GB with STT). Test reply: first word 1.0 s cold, then 0.13 s and 0.11 s; total 1.39 / 0.83 / 0.80 s. **Caution:** Bionic (LM Studio's server) still runs on :1235 with no model; while Route Tony is off, a Tony turn there would load a second copy next to the engine.
 
 **Tony's first word (phone-style turns through the inbox, desktop answering, 10 turns):** before (app on main 3d2e38d) **0.78 s** median (time 1.01, weather 1.16, small talk 0.59, greeting 1.80); after (this build, fast path OFF) **0.98 s** (same path; run-to-run spread plus the first cold turn after the restart). With Instant answers on, time / date / weather / PC-stats asks skip the ~1.0-1.4 s model run (they answer from the clock or the cache in milliseconds); not measured live because the switches stay off.
 

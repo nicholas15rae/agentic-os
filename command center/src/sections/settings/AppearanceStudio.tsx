@@ -163,6 +163,7 @@ const CHOICES: [TokenKey, string, Record<string, string>][] = [
   ["font", "Font", { jakarta: "Jakarta", system: "System", rounded: "Rounded", serif: "Serif", mono: "Mono" }],
   ["widgetFrame", "New widgets", { glass: "Glass", ultra: "Ultra glass", solid: "Solid", frameless: "Frameless" }],
   ["motion", "Motion", { full: "Full", reduced: "Reduced", off: "Off" }],
+  ["animations", "Widget animations", { on: "On", off: "Off" }],
 ];
 
 function TokenEditor({ page }: { page: string | null }) {

@@ -10,7 +10,8 @@ Five items from Nic's UI fixes list, one commit each. Not merged, not pushed, no
 - [x] 2. Live pop-up characters: overlay layer (z-60, under windows / modals / confirm cards / toasts); only the character takes clicks, its bubble never does; corner picked to avoid `[data-safety]`, nav and the page dock (re-checked every 4 s); idle = short blink/bob bursts every ~10 s (nothing loops); reduced motion drops the motion. Gabagool (original drawing, slice + gold coin) pops on 'got it done' toasts (Staged/Saved/Sent/Done…), streaks at 3/5/10, a once-a-day hello, and taps. Right-click / hold: Mute, Hide, Settings. Settings → Appearance → Live characters: show, mute, how often (taps only / rarely / now and then / often), corner, Try it, Reset. `characterEvent()` is the hook for the real coins (Section 28, not built).
 - [x] 3. Fortune cookie crack: the old build set clip-path to SVG path syntax (ignored by the browser), so it never cracked; history kept the previous text; New Fortune wiped history; no daily fortune. Rebuilt by hand: folded-cookie drawing, wobble, two halves swing apart, paper slip slides out; same fortune all day, Another fortune, history of 5, 6 lucky numbers, reduced motion. Source `command center/assets-src/widgets/fortune-cookie/index.html`, copied to `staging/fortune-cookie/index.html` (old one kept as `.iterations/3-pre-uifix.html`). Its pipeline status still says failed (Repair): Nic promotes it after a look.
 - [x] 4. Play Place steers back: Ideas ledger → 'Shape a new idea'. It reads the rough idea, says which kind it is (live character / widget / its own app) and which words decided it, pitches its pick plus a better fit (e.g. 'This would work better as a pop-up character than a box. Want that instead?' with a Yes, that button), asks 3 sharp questions per kind (+ a feeling question for very short ideas), shows the brief (idea in Nic's words + that kind's house rules + answers + taste), then Build raises the usual confirmation card (mode gate respected). New local taste profile (`cc.taste`): answers teach it, shown with forget / reset; the start of Section 5 item 13 (not yet shared with Designer / Director). Standalone builds still go through the same pipeline with an 'own folder, not wired in' brief: a real export path (Section 5 item 15) isn't built.
-- [ ] 5. Animated widgets + Appearance switches
+- [x] 5. Animated widgets: a tap plays Bounce (default), Flip, Glow or Expand, short and ending where it started. Settings → Appearance → Widget animations On/Off (app-wide, per page override). Each widget's Look panel: Tap animation style + strength, saved with the page and its mode preset. Off under OS reduced motion or Motion Reduced/Off; page panels and the hero default to None; safety controls never animate; nothing animates in Edit layout.
+- [ ] 6. (Nic, mid-run) Coin mascot: occasional pop-ins instead of always on
 
 ## HANDOFF: Section 26 merge + gateway (branch `claude/gabagoul-section-status-225cdd`), updated 11-27 20:05
 
@@ -142,7 +143,8 @@ For the next session (Claude Ultra, Monday). Nothing is merged into main or push
 | UI fixes 1: sub-pages for every section (tabs, swipe, Ctrl+Alt+arrows, Move to page, per-page Add panel) | claude/ui-fixes-round-4f8159 | 2eccbda | No |
 | UI fixes 2: live pop-up characters, Gabagool coins mascot first (overlay layer, mute / hide / frequency, safety-control avoidance) | claude/ui-fixes-round-4f8159 | 80b180b | No |
 | UI fixes 3: fortune cookie rebuilt (real crack animation, daily fortune, history, lucky numbers); staging copy updated, still in Repair until Nic promotes | claude/ui-fixes-round-4f8159 | 17969b1 | No |
-| UI fixes 4: Play Place steers back (kind, pitch, sharp questions, brief, taste profile) | claude/ui-fixes-round-4f8159 | see log | No |
+| UI fixes 4: Play Place steers back (kind, pitch, sharp questions, brief, taste profile) | claude/ui-fixes-round-4f8159 | 75b9e74 | No |
+| UI fixes 5: widget tap animations (global switch, per-widget style + strength, reduced motion) | claude/ui-fixes-round-4f8159 | see log | No |
 
 ## 2. In progress
 
@@ -276,6 +278,7 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 
 | Suite | Latest | Where / when |
 |---|---|---|
+| claude/ui-fixes-round-4f8159, item 5 | vitest 3,546/3,546 (+6 tap animations); tsc clean; browser preview: tap on Weather plays the bounce keyframes; switch off = no animation | 11-27 23:00 |
 | claude/ui-fixes-round-4f8159, item 4 | vitest 3,540/3,540 (+16 steer / taste); tsc clean; browser preview: frog-tracker idea → Widget suggested + pop-up character pitch, Yes, that switches kind and questions, Build held by the mode gate | 11-27 22:40 |
 | claude/ui-fixes-round-4f8159, item 3 | widget test 3/3; browser preview: crack opens (halves at ±17°), today's fortune stable across re-crack, Another fortune adds to history, no duplicates | 11-27 22:20 |
 | claude/ui-fixes-round-4f8159, item 2 | vitest 3,521/3,521 (+16 characters); tsc clean; browser preview: hello popped above the dock, bubble lets clicks through (elementFromPoint), right-click menu, Settings card | 11-27 22:05 |
@@ -344,14 +347,15 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-27 22:11 by `python scripts/update_status.py`._
+_Refreshed 2026-11-27 22:17 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `claude/login-widget-navigation-8ae672` | 12 | `2c78073` 2026-11-27 feat(phone): hold-to-switch wheel, magnifier and native haptics | 10 files |
-| `claude/ui-fixes-round-4f8159` | 3 | `17969b1` 2026-11-27 fix(widgets): fortune cookie crack animation (UI fixes 3) | 3 files |
+| `claude/login-widget-navigation-8ae672` | 14 | `92cd6a1` 2026-11-27 chore: rename the app to Gabagoul (package id unchanged) | 7 files |
+| `claude/ui-fixes-round-4f8159` | 4 | `75b9e74` 2026-11-27 feat(playplace): Play Place steers back before building (UI fixes 4) | 8 files |
+| `claude/lock-screen-quick-launch` | 12 | `2c78073` 2026-11-27 feat(phone): hold-to-switch wheel, magnifier and native haptics | clean |
 | `section-26-engine` | 1 | `492853e` 2026-11-27 feat(engine): keeper restarts the engine sidecar after a reboot; ha... | clean |
 | `claude/upbeat-wing-e87be0` | 11 | `5ca67c0` 2026-11-27 Merge main (196b2f8: Sections 8-10 PR #10) into claude/upbeat-wing-... | no worktree |
 | `claude/status-md-tracking-472ac5` | 1 | `6ee8587` 2026-11-27 docs(status): 11.10 and section 12 done, Director and Ops pushes re... | no worktree |

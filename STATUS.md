@@ -3,6 +3,15 @@
 Updated 2026-11-27 19:20. One page for every Claude Code session and branch.
 **Rule for every session:** after each commit or merge, update the sections below and run `python scripts/update_status.py` (refreshes the branch table at the bottom).
 
+## HANDOFF: UI fixes round (branch `claude/ui-fixes-round-4f8159`, from main 0a3cb36), updated 11-27 20:40
+
+Five items from Nic's UI fixes list, one commit each. Not merged, not pushed, no rebuild (Nic's call).
+- [x] 1. Sub-pages for every section: tabs under the edit bar once a section has a 2nd page (or in Edit layout: + Page, rename, reorder, remove); sideways swipe and Ctrl+Alt+←/→; Look panel "Move to page"; Add panel offers another page's panels again (never a 2nd safety control). One-page sections look as before.
+- [ ] 2. Live pop-up characters (overlay layer, Gabagool coins mascot first)
+- [ ] 3. Fortune cookie crack animation
+- [ ] 4. Play Place steers back
+- [ ] 5. Animated widgets + Appearance switches
+
 ## HANDOFF: Section 26 merge + gateway (branch `claude/gabagoul-section-status-225cdd`), updated 11-27 20:05
 
 - section-26-engine merged (33841f2) + 2 test-isolation fixes (agent_runner defaults; gateway Tony reads engine.json from the gateway's config dir). Local `main` moved to this branch. **Not pushed: waiting on Nic.**
@@ -130,6 +139,7 @@ For the next session (Claude Ultra, Monday). Nothing is merged into main or push
 | Fortune-cookie live build (section-pass app, 11-27 10:06-10:25): every brief point reached the verifier and the widget used the style kit; it went to Repair because click probes on its SVG cookie misfired (checker bug, fixed) and the local verifier quoted code not in the page | section-pass | 96829e3 | Yes (f555484), pushed |
 | Build checks catch an animation that never shows (style values the browser rejects, e.g. the cookie's clip-path; elements with click handlers are clicked in the smoke) | section-pass | febc6e9 | Yes (f555484), pushed |
 | Phone APK rebuilt from main 4866634 (arm64 debug, 431 MB) and installed on the S22 over the 11-25 build: same signing key, so app data and the gateway token are kept | claude/phone-apk-agentic-os-764f34 | 4866634 (no code change) | Yes, built from main |
+| UI fixes 1: sub-pages for every section (tabs, swipe, Ctrl+Alt+arrows, Move to page, per-page Add panel) | claude/ui-fixes-round-4f8159 | see log | No |
 
 ## 2. In progress
 
@@ -263,6 +273,7 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 
 | Suite | Latest | Where / when |
 |---|---|---|
+| claude/ui-fixes-round-4f8159, item 1 | vitest 3,505/3,505 (+7 sub-pages); tsc clean; Finance page checked in the browser preview (add page, switch, back to Page 1) | 11-27 20:35 |
 | Phone APK, main 4866634 on the S22 (SM-S901W) | `tauri android build --apk --target aarch64 --debug` OK; `adb install -r` Success; app process up, plugins loaded, no FATAL/panic in logcat. Screen not checked (phone locked) | 11-27 18:01 |
 | section-26-engine (2b44e0f, origin/main 3d2e38d merged) | pytest 1,975 pass, 1 skip; cargo lib 1,715 pass, 3 known (2 real-browser under load, 1 CRLF scan: allm); vitest 3,498/3,498; tsc clean; release build OK (11 m 51 s) | 11-27 18:15 |
 | section-26-engine (756feda) | full pytest 1,841 pass, 1 skip; engine tests 101 + switch 5; test_gateway_tony 80/80; vitest engine 6/6, tsc clean; cargo lib 1,630 pass, 7 fail = 5 load-sensitive real-browser + 2 known CRLF (none in code I changed); pipelines 4/4; GPU bench + CPU smoke 3/3 | 11-27 12:40 |
@@ -327,19 +338,14 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-27 20:08 by `python scripts/update_status.py`._
+_Refreshed 2026-11-27 20:32 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
-| `claude/gabagoul-section-status-225cdd` | 73 | `8852576` 2026-11-27 fix(engine): tests never read the live engine.json; gateway Tony re... | 1 files |
-| `claude/login-widget-navigation-8ae672` | 34 | `9f97041` 2026-11-27 feat(phone): Section 27.6 battery and data saver | clean |
-| `section-26-engine` | 70 | `492853e` 2026-11-27 feat(engine): keeper restarts the engine sidecar after a reboot; ha... | clean |
-| `claude/phone-apk-agentic-os-764f34` | 28 | `bedc23c` 2026-11-27 docs(status): phone APK rebuilt from main 4866634 and installed on ... | clean |
-| `claude/section-26-merge-latency-61c93b` | 28 | `bedc23c` 2026-11-27 docs(status): phone APK rebuilt from main 4866634 and installed on ... | clean |
-| `feat/language-hub` | 27 | `4866634` 2026-11-27 docs(status): section-pass merged into main (f555484) and pushed | clean |
-| `section-pass` | 25 | `f8ce963` 2026-11-27 Merge main (8bb443a: kill switch + options guard) into section-pass | no worktree |
+| `claude/login-widget-navigation-8ae672` | 10 | `70c07ab` 2026-11-27 fix(phone): page switcher hides behind a right-edge handle; swipe b... | 2 files |
+| `section-26-engine` | 1 | `492853e` 2026-11-27 feat(engine): keeper restarts the engine sidecar after a reboot; ha... | clean |
 | `claude/upbeat-wing-e87be0` | 11 | `5ca67c0` 2026-11-27 Merge main (196b2f8: Sections 8-10 PR #10) into claude/upbeat-wing-... | no worktree |
 | `claude/status-md-tracking-472ac5` | 1 | `6ee8587` 2026-11-27 docs(status): 11.10 and section 12 done, Director and Ops pushes re... | no worktree |
 | `feat/ibkr-paper-trading` | 1 | `46778f9` 2026-11-24 fix(trading): fixes from the live paper rehearsal; 3-press kill switch | no worktree |
@@ -347,10 +353,10 @@ _Refreshed 2026-11-27 20:08 by `python scripts/update_status.py`._
 
 **Latest on main**
 
-- `3d2e38d` 2026-11-27 Merge claude/gifted-pascal-abdde6 (GPU session) into main, keeping main's STATUS.md
-- `8bb443a` 2026-11-27 docs(status): trading bridge restarted 17:17 on the kill-switch code
-- `cf44451` 2026-11-27 docs(status): kill switch shipped (8647df7), app restarted 16:25; bridge restart waits on Nic
-- `73ed487` 2026-11-27 docs(status): system.status live check on the 10:41 app, combined main tests
-- `8647df7` 2026-11-27 Merge the kill switch + options guard hardening (claude/practical-elbakyan-0f96f1) into main
-- `4e69152` 2026-11-27 docs(status): app restarted on main 0418649, system.status live and checked
+- `0a3cb36` 2026-11-27 docs(status): handoff: S26 merged on this branch, tests, switches changed, gateway restart plan
+- `8852576` 2026-11-27 fix(engine): tests never read the live engine.json; gateway Tony reads the switch from its own config dir
+- `33841f2` 2026-11-27 Merge section-26-engine: built-in engine, Engine / Models screen, Tony's fast path (every switch off)
+- `1611bde` 2026-11-27 docs: section-pass master doc in docs/ (PDF + text copy); STATUS: drop finished 6 and 23 from Not started, clear stale push question
+- `bedc23c` 2026-11-27 docs(status): phone APK rebuilt from main 4866634 and installed on the S22
+- `4866634` 2026-11-27 docs(status): section-pass merged into main (f555484) and pushed
 <!-- /AUTO:BRANCHES -->

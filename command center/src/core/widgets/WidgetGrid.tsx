@@ -525,7 +525,10 @@ const DISPLAYS: { id: DisplayMode; label: string }[] = [
 
 /** Edit mode → the palette button: this widget's look, saved with the page. */
 function StylePanel({ inst, def, wallpaperId, anchor, onClose }: { inst: WidgetInstance; def: WidgetDefinition<any>; wallpaperId: string; anchor: DOMRect; onClose: () => void }) {
-  const { setLook, setDisplay, setFloat, setPinned, setClickThrough } = useSurface().getState();
+  const useL = useSurface();
+  const { setLook, setDisplay, setFloat, setPinned, setClickThrough, moveToPage } = useL.getState();
+  // UI fixes 1: a panel can go to another of this page's sub-pages (a safety control stays put).
+  const otherPages = useL((s) => s.pages).filter((p) => !p.items.some((i) => i.instanceId === inst.instanceId));
   const locked = isLockedWidget(inst.widgetId);
   const [note, setNote] = useState<string | null>(null);
   const panel = useRef<HTMLDivElement>(null);
@@ -563,6 +566,15 @@ function StylePanel({ inst, def, wallpaperId, anchor, onClose }: { inst: WidgetI
           </button>
         )}
       </Row>
+      {!locked && otherPages.length > 0 && (
+        <Row label="Move to page">
+          {otherPages.map((p) => (
+            <button key={p.id} className={seg(false)} onClick={() => (moveToPage(inst.instanceId, p.id) ? onClose() : setNote(`No room on ${p.name}: make room there first.`))}>
+              {p.name}
+            </button>
+          ))}
+        </Row>
+      )}
       {!locked && inst.float && (
         <Row label="Clicks">
           <button className={seg(!inst.clickThrough)} onClick={() => setClickThrough(inst.instanceId, false)}>

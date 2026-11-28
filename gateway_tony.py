@@ -779,9 +779,50 @@ def _read_json(p: Path) -> Any:
         return None
 
 
+def engine_route() -> Optional[tuple[str, str]]:
+    """Section 26 switch: (Tony's alias, engine base url) when the built-in engine is on AND
+    engine.json route_tony is on; else None and Tony stays on Bionic exactly as before. Read per
+    turn; any problem reading the settings means Bionic (the switch can only fail closed)."""
+    try:
+        from engine.llama_engine import load_settings
+        s = load_settings()
+    except Exception:
+        return None
+    if not (s.enabled and s.route_tony):
+        return None
+    return s.alias, s.base_url
+
+
+def _engine_root(root: str) -> bool:
+    r = engine_route()
+    return bool(r) and bionic_root(r[1]) == (root or "").rstrip("/")
+
+
+def _engine_state(root: str, model: str) -> Optional[str]:
+    """model_state for the built-in engine: 'loaded' (healthy and serving `model`), 'loading' (503
+    while it loads), 'not-loaded' (nothing answers: a cold load starts it), 'absent' (it serves
+    another model), None (it answers with an error)."""
+    try:
+        cc._http_json(f"{root}/health", timeout=3)
+    except urllib.error.HTTPError as e:
+        return "loading" if e.code == 503 else None
+    except Exception:
+        return "not-loaded"
+    try:
+        data = cc._http_json(f"{root}/v1/models", timeout=4)
+    except Exception:
+        return None
+    ids = [m.get("id") for m in (data.get("data") or []) if isinstance(m, dict)] if isinstance(data, dict) else []
+    return "loaded" if model in ids else "absent"
+
+
 def tony_model() -> tuple[str, str]:
     """(model, base url) of Tony's model: providers.json provider `lmstudio`. Never '' and never a
-    'whatever is loaded' pick (cc._pick_model would answer on pixtral if that's what Bionic has)."""
+    'whatever is loaded' pick (cc._pick_model would answer on pixtral if that's what Bionic has).
+    With the Section 26 switch on (engine_route), the built-in engine's alias and base instead."""
+    routed = engine_route()
+    if routed:
+        return routed
     prov = _read_json(_app_dir() / "providers.json")
     for p in (prov.get("providers") if isinstance(prov, dict) else None) or []:
         if isinstance(p, dict) and p.get("id") == "lmstudio":
@@ -804,6 +845,8 @@ def load_body(model: str) -> dict:
 def model_state(root: str, model: str) -> Optional[str]:
     """Bionic's state for `model` from a fresh GET /api/v0/models: 'loaded', 'not-loaded' (or another
     state name), 'absent' when it isn't listed, None when Bionic doesn't answer."""
+    if _engine_root(root):
+        return _engine_state(root, model)
     try:
         data = cc._http_json(f"{root}/api/v0/models", timeout=4)
     except Exception:
@@ -837,13 +880,24 @@ class _Loader(threading.Thread):
     `answered` (Bionic loaded it), `failed` (Bionic said no, or went away), neither (still in flight,
     or our request timed out while Bionic goes on loading)."""
 
-    def __init__(self, root: str, model: str, timeout: float):
+    def __init__(self, root: str, model: str, timeout: float, engine: bool = False):
         super().__init__(daemon=True, name="gateway-tony-load")
         self.url, self.body, self.timeout = f"{root}/api/v1/models/load", load_body(model), timeout
+        self.engine, self.model = engine, model
         self.failed = False
         self.answered = False
 
     def run(self) -> None:
+        if self.engine:  # Section 26: start the built-in engine with Tony's model (fit-checked; refused while off)
+            try:
+                from engine.llama_engine import Engine, load_settings
+                from engine.models import ModelManager
+                s = load_settings()
+                ModelManager(Engine(s)).load(s.model_path, alias=self.model)
+                self.answered = True
+            except Exception:
+                self.failed = True  # off, won't fit next to Bionic, or llama-server didn't come up
+            return
         try:
             cc._http_json(self.url, self.body, timeout=self.timeout)
             self.answered = True
@@ -881,9 +935,10 @@ def _request_load(root: str, model: str, now: float, timeout: float) -> Optional
     if (prev is not None and key == model and not prev.failed and not prev.answered
             and at is not None and 0 <= now - at < COLD_LOAD_MAX_SECS):
         return prev
-    if loaded_instances(root, model):
+    engine = _engine_root(root)
+    if not engine and loaded_instances(root, model):
         return None
-    loader = _Loader(root, model, timeout)
+    loader = _Loader(root, model, timeout, engine=engine)
     with _load_lock:
         _last_load.update(key=model, at=now, loader=loader)
     loader.start()
@@ -1369,7 +1424,7 @@ def _answer(turn: _Turn, payload: dict, deadline: float) -> None:
         raw = turn.stream.raw
     answer = clean_answer(raw)
     if answer:
-        turn.answer, turn.provider = answer, "gateway:lmstudio"
+        turn.answer, turn.provider = answer, ("gateway:engine" if _engine_root(root) else "gateway:lmstudio")
     elif not turn.reason:
         turn.reason = "empty"
 

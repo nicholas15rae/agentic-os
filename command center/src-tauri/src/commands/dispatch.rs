@@ -395,6 +395,9 @@ impl Default for Config {
                 // Bound to the local Docker container on first run (see n8n_discover).
                 p("n8n", "n8n (Docker)", Kind::N8n, "http://127.0.0.1:5678", "-", false),
                 p("google", "Google (Gmail + Calendar)", Kind::Integration, "https://oauth2.googleapis.com", "-", true),
+                // Section 26: the built-in llama.cpp engine (engine/llama_engine.py, off by default).
+                // NOT in policy.chain and never primary: nothing routes to it until Nic switches.
+                p("llamacpp", "Built-in engine (llama.cpp)", Kind::Local, "http://127.0.0.1:1238/v1", "qwen/qwen3.5-9b", false),
             ],
             policy: Policy {
                 gpu_util_max: 85.0,
@@ -554,6 +557,31 @@ impl DispatchState {
 
     pub(crate) fn snapshot(&self) -> Config {
         self.config.read().unwrap().clone()
+    }
+
+    /// The config Tony's chat turns use: `snapshot` with the Section 26 engine switch applied
+    /// (engine_route.rs; OFF = identical to `snapshot`). Settings keep reading `snapshot`, and
+    /// providers.json is never rewritten by the switch.
+    pub(crate) fn chat_snapshot(&self) -> Config {
+        super::engine_route::effective(self.snapshot(), self.engine_route().as_ref())
+    }
+
+    /// engine.json beside providers.json (None: missing or unsafe = OFF).
+    pub(crate) fn engine_route(&self) -> Option<super::engine_route::EngineRoute> {
+        self.config_dir().and_then(|d| super::engine_route::read(&d))
+    }
+
+    /// Tony's local model provider: LM Studio, or the built-in engine while its switch is on.
+    /// OFF: exactly `provider("lmstudio")`, as before the switch existed.
+    pub(crate) fn tony_local(&self) -> Option<Provider> {
+        let on = self.engine_route().is_some_and(|r| r.tony_on());
+        let id = if on { super::engine_route::ENGINE_ID } else { super::engine_route::LMSTUDIO_ID };
+        self.chat_snapshot().providers.into_iter().find(|p| p.id == id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_path_for_tests(&self, path: PathBuf) {
+        *self.path.write().unwrap() = Some(path);
     }
 
     /// Apply a change, validate the result, and write providers.json. All-or-nothing.
@@ -1046,7 +1074,7 @@ pub(crate) async fn run_chat(
     if messages.is_empty() || messages.len() > 64 {
         return Err("1–64 messages required".into());
     }
-    let cfg = state.snapshot();
+    let cfg = state.chat_snapshot();
     let osc = os.snapshot();
     let find = |id: &str| cfg.providers.iter().find(|p| p.id == id && p.kind.is_chat()).cloned();
 
@@ -1572,7 +1600,7 @@ pub(crate) fn short(e: reqwest::Error) -> String {
 pub(crate) async fn run_chat_streamed(state: &DispatchState, os: &OsState, messages: Vec<ChatMessage>, max_secs: Option<u64>, app: &tauri::AppHandle, stream_id: &str) -> Result<DispatchResult, String> {
     use futures_util::StreamExt;
     use tauri::Emitter;
-    let cfg = state.snapshot();
+    let cfg = state.chat_snapshot();
     let osc = os.snapshot();
     let first = cfg.policy.chain.iter().filter_map(|id| cfg.providers.iter().find(|p| &p.id == id && p.kind.is_chat())).next().cloned();
     // Tony's turn never auto-overflows (section 20-21 safe defaults: `shape_tony_turn`).
@@ -1681,6 +1709,22 @@ mod part4_tests {
         assert!(r.contains("cut off"));
         let (c, r) = stream_outcome("Done.", true);
         assert_eq!((c.as_str(), r.as_str()), ("Done.", "chain · streamed"));
+    }
+
+    /// Section 26: the built-in engine is listed but off the request path. Tony stays on
+    /// LM Studio (primary, first in the chain) and no chain or default picks the engine.
+    #[test]
+    fn builtin_engine_is_listed_but_never_routed() {
+        let c = Config::default();
+        let e = c.providers.iter().find(|p| p.id == "llamacpp").expect("llamacpp provider");
+        assert_eq!(e.base_url, "http://127.0.0.1:1238/v1");
+        assert_eq!(c.policy.primary_local, "lmstudio");
+        assert_eq!(c.policy.chain.first().map(String::as_str), Some("lmstudio"));
+        assert!(!c.policy.chain.iter().any(|id| id == "llamacpp"));
+        assert_ne!(c.policy.fallback_cloud, "llamacpp");
+        assert_ne!(c.policy.verifier, "llamacpp");
+        // the first local provider (language_hub fallback) is still LM Studio
+        assert_eq!(c.providers.iter().find(|p| p.kind == Kind::Local).map(|p| p.id.as_str()), Some("lmstudio"));
     }
 
     #[test]

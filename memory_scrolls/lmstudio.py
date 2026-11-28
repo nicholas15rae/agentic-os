@@ -2,6 +2,7 @@
 
 - `loaded_chat_model` reads `GET /api/v0/models` and returns the first entry with `state == "loaded"`
   and type llm/vlm. It never falls back to the plain model listing (that order could JIT-load a model).
+  Section 26: when `base` is the built-in engine with Tony's switch on, its /health answers instead.
 - `chat` sends exactly one chat completion for that model id, under a module lock.
 - `busy_reason` is the D8 idle check for a standalone run.
 """
@@ -26,7 +27,28 @@ def api_root(base: str) -> str:
     return b[: -len("/v1")] if b.endswith("/v1") else b
 
 
+def _engine_alias(base: str, timeout: float) -> Optional[str]:
+    """Section 26: `base` is the built-in engine while Tony's switch is on (engine.json
+    enabled + route_tony): llama-server serves exactly one model and never JIT-loads, so its
+    /health is the "loaded" check. Anything else (switch off, another URL): None."""
+    try:
+        from engine.llama_engine import load_settings
+        s = load_settings()
+    except Exception:
+        return None
+    if not (s.enabled and s.route_tony) or base.rstrip("/") != s.base_url.rstrip("/"):
+        return None
+    try:
+        h = net.get_json(f"{api_root(base)}/health", timeout=timeout)
+    except Exception:
+        return None
+    return s.alias if isinstance(h, dict) and h.get("status") == "ok" else None
+
+
 def loaded_chat_model(base: str, timeout: float = 4.0) -> Optional[str]:
+    alias = _engine_alias(base, timeout)
+    if alias:
+        return alias
     try:
         data = net.get_json(f"{api_root(base)}/api/v0/models", timeout=timeout)
     except Exception:

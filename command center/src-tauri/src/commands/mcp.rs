@@ -1587,7 +1587,16 @@ async fn call_tool_from(state: &DispatchState, os: &OsState, bridge: &BridgeStat
     // An async block, so an early `?`/`return` still reaches `bridge.log` below.
     let out: Result<String, String> = async {
         match name {
-            "weather.current" if server_on("weather") => weather(state, &arg("place")).await,
+            "weather.current" if server_on("weather") => {
+                // Section 26 fast path: home weather from the stats cache when it is on and fresh.
+                let place = arg("place");
+                let home = place.is_empty() || place.eq_ignore_ascii_case("toronto") || place.eq_ignore_ascii_case("home");
+                let cached = (home && state.config_dir().is_some_and(|d| super::fastpath::read(&d).stats_cache)).then(super::fastpath::cached_weather).flatten();
+                match cached {
+                    Some(w) => Ok(w),
+                    None => weather(state, &place).await,
+                }
+            }
             "time.now" if server_on("time") => Ok(chrono::Local::now().format("%A, %B %-d %Y · %-I:%M %p (%Z local time)").to_string()),
             // Read-only probes (`infra_status`): never starts, stops or changes a service.
             super::infra_status::TOOL if server_on(super::infra_status::SERVER) => Ok(super::infra_status::report(state, os).await),
@@ -1801,7 +1810,7 @@ fn wmo(code: i64) -> &'static str {
     }
 }
 
-async fn weather(state: &DispatchState, place: &str) -> Result<String, String> {
+pub(crate) async fn weather(state: &DispatchState, place: &str) -> Result<String, String> {
     let (lat, lon, label) = if place.is_empty() || place.eq_ignore_ascii_case("toronto") || place.eq_ignore_ascii_case("home") {
         (43.6532, -79.3832, "Toronto".to_string())
     } else {

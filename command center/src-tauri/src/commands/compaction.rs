@@ -465,7 +465,7 @@ fn launch_inputs(app: &tauri::AppHandle, with_key: bool) -> Launch {
     let key = if with_key { super::secrets::get(&st, "anythingllm") } else { None };
     let mut known = super::devqueue::known_secrets(&st, &os);
     known.extend(key.clone());
-    Launch { python: python_program(&gw.command), workdir: PathBuf::from(gw.workdir), lm_base: st.provider("lmstudio").map(|p| p.base_url), key, known }
+    Launch { python: python_program(&gw.command), workdir: PathBuf::from(gw.workdir), lm_base: st.tony_local().map(|p| p.base_url), key, known }
 }
 
 /// Run the CLI to completion off the async runtime. `cancel` kills it (whole job).

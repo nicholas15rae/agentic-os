@@ -72,3 +72,6 @@ data/security/
 
 # STT benchmark clips and results (stt/bench; synthetic now, real voice recordings later)
 data/stt-bench/
+
+# Section 26 engine: bench results, runtime state, doc store, AnythingLLM exports (local only)
+data/engine/

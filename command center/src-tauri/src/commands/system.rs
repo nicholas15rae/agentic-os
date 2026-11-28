@@ -16,21 +16,24 @@ impl Default for SysState {
     }
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct GpuStats {
     pub name: String,
     pub util_pct: f32,
     pub vram_used_mb: u64,
     pub vram_total_mb: u64,
+    /// GPU core temperature (°C), when nvidia-smi reports it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temp_c: Option<f32>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemStats {
-    cpu_pct: f32,
-    mem_used_mb: u64,
-    mem_total_mb: u64,
+    pub(crate) cpu_pct: f32,
+    pub(crate) mem_used_mb: u64,
+    pub(crate) mem_total_mb: u64,
     hostname: Option<String>,
     gpu: Option<GpuStats>,
 }
@@ -147,7 +150,7 @@ pub fn gpu_sampler_running() -> bool {
 
 fn parse_gpu_line(line: &str) -> Option<GpuStats> {
     let mut parts = line.split(',').map(str::trim);
-    Some(GpuStats { name: parts.next()?.to_string(), util_pct: parts.next()?.parse().ok()?, vram_used_mb: parts.next()?.parse().ok()?, vram_total_mb: parts.next()?.parse().ok()? })
+    Some(GpuStats { name: parts.next()?.to_string(), util_pct: parts.next()?.parse().ok()?, vram_used_mb: parts.next()?.parse().ok()?, vram_total_mb: parts.next()?.parse().ok()?, temp_c: parts.next().and_then(|t| t.parse().ok()) })
 }
 
 fn ensure_sampler() {
@@ -159,7 +162,7 @@ fn ensure_sampler() {
     }
     let ms = GPU_SAMPLE_MS.to_string();
     let mut cmd = std::process::Command::new("nvidia-smi");
-    cmd.args(["--query-gpu=name,utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits", "-lms", &ms]).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).stdin(std::process::Stdio::null());
+    cmd.args(["--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu", "--format=csv,noheader,nounits", "-lms", &ms]).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).stdin(std::process::Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -203,15 +206,8 @@ fn ensure_sampler() {
 pub fn query_gpu() -> Option<GpuStats> {
     let out = proc::stdout(
         "nvidia-smi",
-        &["--query-gpu=name,utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"],
+        &["--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu", "--format=csv,noheader,nounits"],
     )
     .ok()?;
-    let line = out.lines().next()?;
-    let mut parts = line.split(',').map(str::trim);
-    Some(GpuStats {
-        name: parts.next()?.to_string(),
-        util_pct: parts.next()?.parse().ok()?,
-        vram_used_mb: parts.next()?.parse().ok()?,
-        vram_total_mb: parts.next()?.parse().ok()?,
-    })
+    parse_gpu_line(out.lines().next()?)
 }

@@ -363,6 +363,8 @@ pub fn run() {
                 // MCP: start listing enabled stdio servers ~5 s after launch (into the cache, in
                 // the background). No HTTP / token-gated server is contacted.
                 tauri::async_runtime::spawn(mcp::warm(app.handle().clone()));
+                // Section 26: the stats cache (idle while fastpath.json statsCache is off).
+                commands::fastpath::spawn(app.handle().clone());
                 // Section pass: the Librarian workspace is kept on Query mode (checked once at start).
                 tauri::async_runtime::spawn(mcp::librarian_lock_at_start(app.handle().clone()));
                 tauri::async_runtime::spawn(pipelines::auto_sync_loop(app.handle().clone()));
@@ -529,6 +531,11 @@ pub fn run() {
             review_queue::review_webhook_set,
             review_queue::review_webhook_clear,
             review_queue::review_webhook_test,
+            commands::engine_route::engine_switch_get,
+            commands::engine_route::engine_call,
+            commands::fastpath::fastpath_get,
+            commands::fastpath::fastpath_set,
+            commands::engine_route::engine_switch_set,
             commands::tony_dispatch::tony_dispatch_approve,
             commands::tony_dispatch::tony_dispatch_discard,
             secrets::secret_set,

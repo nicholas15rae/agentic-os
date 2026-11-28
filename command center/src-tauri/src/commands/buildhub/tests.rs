@@ -1084,7 +1084,7 @@ fn round2_intake_call_holds_the_baton_and_a_timeout_keeps_it_settling() {
     let src = include_str!("../buildhub.rs");
     let body = &src[src.find("pub async fn build_intake_questions").unwrap()..];
     let body = &body[..body.find("\n}\n").unwrap()];
-    let (prov, ask) = (body.find("provider(\"lmstudio\")").unwrap(), body.find("ask_in_slot(").unwrap());
+    let (prov, ask) = (body.find("tony_local()").unwrap(), body.find("ask_in_slot(").unwrap());
     assert!(prov < ask, "provider check first");
     assert!(!body.contains("intake_slot("), "no un-armed baton path left");
 }

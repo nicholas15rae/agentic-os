@@ -5,7 +5,7 @@ import { SETTINGS_TAB_EVENT, SETTINGS_TAB_KEY } from "./settings-tab";
  * The open Settings tab, shared by the tab bar and the content panels. Remembered for the session
  * (sessionStorage), and a deep link (`requestSettingsTab`) switches it even while Settings is open.
  */
-const TAB_IDS = ["services", "voice", "modes", "comms", "integrations", "business", "appearance", "security"];
+const TAB_IDS = ["services", "engine", "voice", "modes", "comms", "integrations", "business", "appearance", "security"];
 
 function stored(): string {
   try {

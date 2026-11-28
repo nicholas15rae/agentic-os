@@ -2855,7 +2855,7 @@ pub async fn build_intake_questions(app: AppHandle, notes: Vec<IntakeNote>) -> R
     let os = app.state::<OsState>();
     let cfg = os.snapshot();
     // Provider first: with no local model configured there is nothing to wait for.
-    let reply = match st.provider("lmstudio") {
+    let reply = match st.tony_local() {
         Some(p) if !p.model.is_empty() => {
             let mut system = super::agent_prompts::role_prompt("prompter", false);
             if super::agent_prompts::is_thinking_model(&p.model) {

@@ -521,7 +521,7 @@ fn kokoro(d: &DispatchState) -> Option<Provider> {
 }
 
 fn llm(d: &DispatchState) -> Result<Provider, String> {
-    let cfg = d.snapshot();
+    let cfg = d.chat_snapshot();
     let want = cfg.policy.primary_local.clone();
     cfg.providers
         .iter()

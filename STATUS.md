@@ -3,6 +3,26 @@
 Updated 2026-11-27 19:20. One page for every Claude Code session and branch.
 **Rule for every session:** after each commit or merge, update the sections below and run `python scripts/update_status.py` (refreshes the branch table at the bottom).
 
+## HANDOFF: Section 26 engine (branch `section-26-engine`, worktree `G:\agentic-os-engine`), updated 11-27 18:30
+
+For the next session (Claude Ultra, Monday). Nothing is merged into main or pushed, and **no switch is on**. The desktop app now runs from this branch: built 18:19, restarted 18:21 from `G:\agentic-os-engine\command center\src-tauri\target\release\command-center.exe` (pid 18728), with origin/main 3d2e38d merged in first. Tony is on LM Studio. Read `docs/section-26-plan.md`, `docs/section-26-allm-inventory.md`, `docs/section-26-bizops-prompt.md`.
+
+**Built (all off, all tested):** engine (llama.cpp b12317, :1238, thinking off), model manager + fit check, watchdog, GPU baton yield/reclaim, gateway `/api/engine/*` (loopback only), doc store + ingest, AnythingLLM export (secrets scrubbed), gateway agents with their MCP-registry tools, thread store, gateway Tony's switch, **desktop Tony's switch** (`engine_route.rs`: chat turns, streaming, director, status tool, Language Hub, compaction, builder intake; ComfyUI batches yield/reclaim the engine; providers.json never rewritten), **Settings → Engine / Models** tab (switches, where chat / memory run, Test reply, last benchmark, models with Set as Tony's model and load blocked when it won't fit, VRAM meter), **Tony's fast path** (`fastpath.rs`).
+
+**Switches, all false:** `engine.json` (`enabled`, `route_tony`, `route_agents`) and `fastpath.json` (`smallTalkSkipsTools`, `instantCues`, `statsCache`), both beside providers.json. Turning any on is Nic's call.
+
+**Gateway vs engine routes (19:05):** the real gateway (:8080) still runs `G:\agentic os` (feat/language-hub 4866634, launched by the app from providers.json `gateway.workdir`). It is NOT moved to the worktree: its store, `.env`, backups and audit live in that folder. The engine routes run from the worktree as a loopback **sidecar on 127.0.0.1:8081** (`python -m engine.serve`; after a reboot run `scripts\start-engine-sidecar.ps1`). The app's Engine / Models screen reaches them through Rust `engine_call` (gateway first, sidecar on a 404). App rebuilt + restarted 19:00 (pid 4032).
+
+**Engine live (19:00):** `engine.json` enabled=true (Nic's go-ahead to load), **route_tony=false, route_agents=false**. Tony's `D:\LM Studio\lmstudio-community\Qwen3.5-9B-GGUF\Qwen3.5-9B-Q4_K_M.gguf` loaded on the engine in 35 s (VRAM 9.5 / 12 GB with STT). Test reply: first word 1.0 s cold, then 0.13 s and 0.11 s; total 1.39 / 0.83 / 0.80 s. **Caution:** Bionic (LM Studio's server) still runs on :1235 with no model; while Route Tony is off, a Tony turn there would load a second copy next to the engine.
+
+**Tony's first word (phone-style turns through the inbox, desktop answering, 10 turns):** before (app on main 3d2e38d) **0.78 s** median (time 1.01, weather 1.16, small talk 0.59, greeting 1.80); after (this build, fast path OFF) **0.98 s** (same path; run-to-run spread plus the first cold turn after the restart). With Instant answers on, time / date / weather / PC-stats asks skip the ~1.0-1.4 s model run (they answer from the clock or the cache in milliseconds); not measured live because the switches stay off.
+
+**Connection check (18:25, `python -m engine.connections`):** 24 pass, 1 warn (no vision projector, expected), 0 fail.
+
+**Left:** a gateway running this branch (merge, Nic's call); a desktop bridge so gateway agents can run desktop-only tools; engine tuning run (needs Nic's OK); Nic's review of the Biz Ops calls; vault join (Nic); vision via Tony's mmproj (plan only); a live check of the fast path once Nic turns it on.
+
+**Commands:** `python -m engine.connections`, `python -m engine.bench_turns --label <x>` (end-to-end first word), `python -m engine.bench_swap` (GPU bench, restores Tony), `python -m engine.bench_tony --target lmstudio|engine`, `python -m engine.template_check --live engine`, `python -m engine.smoke_cpu`, `python -m engine.models fit|list|vram`, `python -m engine.allm_import report|redact <export>`, `python -m engine.agents_migrate <export>`, `python -m engine.ingest scrolls`, `python -m engine.bizops <tag>`.
+
 ## 1. Done
 
 | What | Branch | Commit | In main? |
@@ -54,7 +74,38 @@ Updated 2026-11-27 19:20. One page for every Claude Code session and branch.
 | Tony live-test fixes (11-27), 6 of 7: Gmail reads/searches Primary only (`category:primary in:inbox`) unless you name a tab; saved in Settings → Comms (new tab, default Primary only); each email line names sender, subject and inbox; prompt rule: never claim a read with no tool run; Gmail tab names in the Whisper hint list (one-time migration moves an unedited old default); internal labels like "Spoken reply" stripped before TTS; to-do adds ask "Add “…”?" with your exact words and save only on yes | claude/tony-live-test-fixes-5d85d5 | 1318759 | Yes (9d37071), pushed to origin; in the 0418649 rebuild the parroting session is restarting |
 | Tony live-test fix 6, barge-in (you said build it): "hold on" is a hard stop like "stop" (start of a line only; "hold on a sec" too; a passive room listen still needs the wake word); talking over Tony while he's audible stops him at speech onset and drops the rest of the reply (never resumed or repeated; the bubble keeps what was written). Over a turn still thinking, he only ducks, as before | claude/tony-live-test-fixes-5d85d5 | e802ad3 | Yes (9d37071), pushed to origin; in the 0418649 rebuild the parroting session is restarting |
 | Ops agent removed: its infra topics and Maps are Tony's, quotes / estimates stay Tony's (your call 11-26), frozen-Ops placeholder gone; one-time `ops-removed` os.json migration (backup first; dry run on the live 23:40 os.json: 5 sections change, roster 8) | claude/elated-kare-67e4c4 | 90ac158 | Yes (9c57359), not pushed; live since the 00:31 restart, os.json migrated (backup `os.json.bak-20261127-003126-ops-removed`) |
-| Tony's read-only `system.status` tool: droplet (over NetBird), gateway, Bionic, STT, Kokoro, Docker, n8n, up/down + latency; status questions run it with no router call (phone turns included); never starts or changes anything | claude/unruffled-mayer-1247f9 | 6eae983 | Yes (87b6527), on origin; live since the 10:41 restart (main 0418649): "is the droplet up?" on the phone path answered "up, 62 ms" |
+| Tony's read-only `system.status` tool: droplet (over NetBird), gateway, Bionic, STT, Kokoro, Docker, n8n, up/down + latency; status questions run it with no router call (phone turns included); never starts or changes anything | claude/unruffled-mayer-1247f9 | 6eae983 | Yes (merged 11-27 09:50 on top of PR #10), not pushed; app rebuild + live check in progress |
+| S26: plan + Tony latency bench (`engine/bench_tony.py`; refuses unless Tony's model is loaded and the baton is free) | section-26-engine | 686860b | No |
+| S26: pinned official llama.cpp b12317 CUDA 12.4 in `D:\llama.cpp\b12317` (sha256-pinned) + llama-server runner on :1238, off by default (`engine.json` enabled=false) | section-26-engine | 5a45469 | No |
+| S26: model manager: lists the library, VRAM from nvidia-smi, GGUF-based fit check (Tony's 9B needs ~7.3 GB at 32k: 5.2 weights + 1.0 KV + 0.8 compute), refuses loads that don't fit | section-26-engine | 406619d | No |
+| S26: document store (own SQLite, CPU nomic via the vault's `embed()`, hybrid search; the vault itself untouched) | section-26-engine | 92528ab | No |
+| S26: AnythingLLM export + import, read-only on AnythingLLM. Export `G:\agentic-os-engine\data\engine\allm-export\20261127-101548` (11 workspaces, 227 chats, 7 docs, integrity ok); 7 docs -> 22 chunks, all embedded | section-26-engine | 101fd2a | No |
+| S26: AnythingLLM inventory: 14 functions mapped to their gateway home (docs/section-26-allm-inventory.md); Gmail/Calendar already call Apps Script directly; phone has no AnythingLLM endpoint | section-26-engine | e1fe0c1 | No |
+| S26: watchdog (restart a crashed llama-server with the same model, 3 restarts / 5 min limit, waits for the baton, never acts while off) | section-26-engine | d3d1993 | No |
+| S26: Qwen template + tool-call checks; engine defaults thinking OFF (Qwen3.5's template ignores reasoning_effort) | section-26-engine | 08c0d0d | No |
+| S26: `llamacpp` provider listed in dispatch.rs, never in any chain (test pins it) | section-26-engine | b05c691 | No |
+| S26: resumable Hugging Face GGUF download + Recycle-Bin delete (typed confirm) | section-26-engine | 285d583 | No |
+| S26: Settings -> Services -> Built-in engine card (status, VRAM, models + fit, load/unload, settings, download, delete); needs a rebuild to see | section-26-engine | 0162a7d | No |
+| S26: gateway `/api/engine/*` (loopback only), boot hook, GPU baton yield/reclaim | section-26-engine | 24dbfe8 | No |
+| S26: agent-table proposal from os.json + the export (read-only, not wired) | section-26-engine | 840aadc | No |
+| S26: CPU-only smoke test of the real llama-server (no GPU): 3/3 live checks, first token 1.0 s on CPU | section-26-engine | 1569272 | No |
+| S26: AnythingLLM export holds no API key or token in plain text (6/6 live secrets scrubbed, VACUUMed; new exports scrub automatically); gitignored; no Drive sync on this PC | section-26-engine | 47ae063 | No |
+| S26: your tool owners in the agent proposal (Coder owns filesystem + fetch, Tony owns knowledge-graph writes, readers read-only; one writer per tool, tested) | section-26-engine | 145949e | No |
+| S26: Tony's gateway prompt is the only Tony prompt; Booking takes the detailed Booking Desk prompt (to confirm) | section-26-engine | 95e021a | No |
+| S26: Biz Ops shared prompt DRAFT (Acting, Contracting, BF Supplements sections by business tag); both business workspaces map to it | section-26-engine | 5a66c07 | No |
+| S26: Biz Ops prompt builder (only the tagged business's section; refuses scope bleed) | section-26-engine | 5a6df42 | No |
+| S26: **step 5 GPU benchmark** (engine vs LM Studio) with Tony restored exactly (same 6 load settings, answered in 1.7 s); VRAM estimate calibrated | section-26-engine | 7d08994 | No |
+| S26: Designer reads the repo widget folders only; Booking's future access recorded (read-only WhatsApp, draft-only Gmail, Tony owns both; stays frozen) | section-26-engine | f2e8545 | No |
+| S26: Drive sync never uploads the AnythingLLM export, `data/engine` or backup archives (`never_syncs`, tested); OneDrive covers only your user folders, not G: | section-26-engine | acbad0b | No |
+| S26: agent table carries the 4 built-in role prompts verbatim (from agent_prompts.rs) | section-26-engine | 96a13a6 | No |
+| S26: **gateway agents run their MCP-registry tools** under Nic's policy (owner / read / draft, registry read-only, permissions, kill switch, folders, no money tools); live CPU check: Director listed its projects, a read outside was refused; switch `route_agents` OFF | section-26-engine | f63a78b | No |
+| S26: **thread store** for gateway agents; 227 AnythingLLM chats archived as 32 threads (history only, Finance never imported) | section-26-engine | 6d73548 | No |
+| S26: **document ingest**: Tony-only notes + memory-scroll sync into the doc store (5 scrolls in) | section-26-engine | b3d31e5 | No |
+| S26: **gateway Tony's switch to the engine**, built and tested behind `route_tony` (OFF; with it off Tony's path is unchanged) | section-26-engine | 756feda | No |
+| S26: **desktop Tony's chat switch** behind `route_tony` (OFF): chat chain, streaming, director, status tool, Language Hub, compaction, builder intake; ComfyUI GPU hand-off yields / reclaims the engine | section-26-engine | cff8257 | No |
+| S26: **Settings → Engine / Models** tab: Engine on / Route Tony / Gateway agents switches, where chat and memory run, Test reply (first word + total), last benchmark, Set as Tony's model, load blocked when it won't fit | section-26-engine | aee7208 | No |
+| S26: **Tony's fast path** (`fastpath.json`, all OFF): small talk skips tools, instant time / date / weather / PC-stats answers with no model run, stats cache (CPU, RAM, GPU, VRAM, GPU temp every 5 s; weather every 10 min) | section-26-engine | 2b44e0f | No |
+| S26: app rebuilt and restarted from the worktree (origin/main 3d2e38d merged first); connection check 24 pass, 1 expected warn | section-26-engine | 2b44e0f | No |
 | Section 5 cleanup: no Librarian in the build chain, one true build status, archive | section-pass | d94c6cd | Yes (f555484), pushed |
 | Section 6 home grid: push-aside, widget drawer, page presets, widget looks, tap to focus, icons + windows | section-pass | b5b98ee, 604c334 | Yes (f555484), pushed |
 | Everything-is-customizable rule (AGENTS.md) + shared layout plan (docs/shared-layout-plan.md) | section-pass | 76eb094 | Yes (f555484), pushed |
@@ -84,6 +135,7 @@ Updated 2026-11-27 19:20. One page for every Claude Code session and branch.
 | Stop the UI burning GPU | Done | Kill switch merged (8647df7), pushed, app restarted 16:25 on 8647df7 (hidden: GPU 0.00%), bridge restarted 17:17 on the new code. Nothing in flight |
 | Make run_all.py run every trading test | Trading test gate | Finding why the gate takes 9 min (550 s). Uncommitted |
 | Port 46778f9 / kill switch (practical-elbakyan) | Done; session closed | Round 4 fixed in 5a55ebc; merged into main by the GPU session. Round-5 follow-ups listed under Waiting on you |
+| Section 26 engine (section-26-engine, worktree G:\agentic-os-engine) | Built-in llama.cpp engine beside LM Studio / AnythingLLM, off | Stopped at a clean commit with a handoff (top of this page). Waiting on you: GPU bench, rebuild, questions |
 
 ## 3. Waiting on you
 - Director length hint may suggest moving a clip's START earlier (run 14 had no out point free, so it suggested opening clip 1 on the line before). Keep, or out points only?
@@ -93,6 +145,14 @@ Updated 2026-11-27 19:20. One page for every Claude Code session and branch.
 - Scene Reader link (Part 4): its app has no HTTP endpoint; the card shows when Studio TTS (:5123) answers. Import reads %APPDATA%\com.scenereader.dev (copy only). OK, or want a real export endpoint in Scene Reader (its repo)?
 - Director Part 3 contract questions (defaults picked, change any): (1) ComfyUI policy select sits on the Queue card and applies to every project; (2) Re-roll of a style-transfer whose job was pruned from the queue is disabled; (3) Restore is offered only from the Versions tab.
 - Director Part 3 phone review needs a gateway (server.py) /api/media proxy behind the security gate: shared core, so not built. OK to build it?
+
+**Questions for Nic (Section 26, section-26-engine)** (answers through your 2nd 11-27 message are applied; these are my calls for you to review)
+- S26 fast path: you asked for "what's pending" as an instant answer, but on 11-27 you decided it stays Tony's live Finance read, and money code is off limits for me. I left it as is. Say if you want it changed.
+- S26: to use the Engine / Models model list, Test reply and turning the engine on, the gateway has to run this branch. Merge it, or restart the gateway from `G:\agentic-os-engine`?
+- **Biz Ops draft, my calls on its 4 questions (kept UNUSED until you approve):** (1) Name "Biz Ops" and the old workspaces' tone: kept, because the scope rules are already proven in the two live workspaces and one name across businesses keeps routing simple. (2) Acting: casting posts and Gmail drafts stay with the **Booking Desk**, so Biz Ops points there. Booking already owns that flow and its templates, and two agents drafting the same emails would double up. (3) Section title **"BF Supplements"**, since that's what you call it; the registry name stays "Supplements & E-Commerce" for matching. (4) `instagram`: Biz Ops keeps it **read-only / draft posts only**, never posts; same pattern as Booking's draft-only Gmail.
+- Play Place has no assets folder in the repo (its items live in the gateway's shared store, next to the vault), so Designer gets only `command center\src\widgets` and `recovered-widgets`. Name a Play Place folder if you want one added.
+- Engine tuning (optional): the engine's first-token tail is worse than LM Studio's (p90 1.61 s vs 0.27 s back to back), most likely prompt-cache misses across its 2 slots. Each tuning run unloads Tony for ~3 min (Bionic's reload took 100 s). OK to try `--cache-ram` / one unified KV slot set in one more run when the GPU is idle?
+
 
 **Decisions**
 - section-pass converted Comms and Operations to the shared layout. The Communications/brainstorming and Remove-Ops sessions also touch those pages: expect merge conflicts in `CommsSection.tsx` / `OperationsSection.tsx`; Brainstorm and Director were left alone for them.
@@ -196,6 +256,8 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 | Suite | Latest | Where / when |
 |---|---|---|
 | Phone APK, main 4866634 on the S22 (SM-S901W) | `tauri android build --apk --target aarch64 --debug` OK; `adb install -r` Success; app process up, plugins loaded, no FATAL/panic in logcat. Screen not checked (phone locked) | 11-27 18:01 |
+| section-26-engine (2b44e0f, origin/main 3d2e38d merged) | pytest 1,975 pass, 1 skip; cargo lib 1,715 pass, 3 known (2 real-browser under load, 1 CRLF scan: allm); vitest 3,498/3,498; tsc clean; release build OK (11 m 51 s) | 11-27 18:15 |
+| section-26-engine (756feda) | full pytest 1,841 pass, 1 skip; engine tests 101 + switch 5; test_gateway_tony 80/80; vitest engine 6/6, tsc clean; cargo lib 1,630 pass, 7 fail = 5 load-sensitive real-browser + 2 known CRLF (none in code I changed); pipelines 4/4; GPU bench + CPU smoke 3/3 | 11-27 12:40 |
 | main 8647df7 (kill switch merge) | tsc clean; vitest 3,352/3,352; pytest run_all 988 OK; all test_trading_* 748 OK; cargo 1,693 (+2 known CRLF; 1 real-browser test failed under load, passes alone) | 11-27 11:05 |
 | Live app (10:41 build, main 0418649), the system.status session's own check | 2 phone-style inbox turns, both answered by the desktop: "Tony, is the droplet up?" -> "Yeah, the Droplet is up and running, Nic..." (system.status 382 ms; droplet 61 ms, from the app's own 15-second check 2 s earlier); "is Docker running?" -> "Yeah, Docker is running good." First words 1.8 s and 1.2 s | 11-27 11:01 |
 | main 8647df7 (+ kill switch / options guard hardening) | tsc clean; vitest 3,352/3,352; cargo 1,694 (+2 known CRLF; Edge tests passed) | 11-27 11:30 |
@@ -239,6 +301,14 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 | Playwright | not run (`@playwright/test` not installed in one worktree) | |
 | Stress (Heavy probe) | Tony 13.8 s, 35.9 tok/s; VRAM peak 74.6%, no spill | 11-25 21:51 |
 
+**Section 26 bench: Tony at the model server, real phone-turn messages, 4 prompts x 3 (11-27 10:31)**
+- LM Studio / Bionic (today): first token **0.37 s** median (p90 1.11, min 0.22; first turn of each prompt 0.83); total **1.71 s** median (p90 3.53); 11/12 under 1.5 s
+- **Built-in engine on GPU (11:13, Tony's 9B, 32k x 2, same prompts): first token 0.38 s median** (p90 1.61, min 0.23; first turn of each prompt 0.56); **total 1.93 s** median (p90 3.50); 10/12 under 1.5 s; live checks 3/3; **6.2 GB VRAM vs LM Studio's 7.3 GB**; loads in 19 s
+- LM Studio again right after (11:15, warm): first token **0.25 s** median (p90 0.27); total **1.45 s** (p90 2.02); 12/12 under 1.5 s
+- Verdict: about level on a typical turn, better on cold turns, worse tail (cache misses across slots, tuneable); uses 1.1 GB less VRAM. Tony restored exactly after the run.
+- CPU-only smoke test: first token 1.0 s, total 3.4 s for a short reply; live checks 3/3
+- Live template checks on Bionic: thinking off, native tool call, JSON router: 3/3 OK
+
 **Tony, time to first word (11-26)**
 - Phone, desktop answering: **1.33 s** median (was 2.7 s); done 2.17 s
 - Phone, app closed, gateway answers: 0.66-1.29 s
@@ -249,14 +319,14 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-27 19:15 by `python scripts/update_status.py`._
+_Refreshed 2026-11-27 19:24 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
+| `claude/gabagoul-section-status-225cdd` | 29 | `1611bde` 2026-11-27 docs: section-pass master doc in docs/ (PDF + text copy); STATUS: d... | clean |
 | `section-26-engine` | 67 | `913cef7` 2026-11-27 feat(engine): engine sidecar + engine_call so the Engine / Models s... | 1 files |
-| `claude/gabagoul-section-status-225cdd` | 28 | `bedc23c` 2026-11-27 docs(status): phone APK rebuilt from main 4866634 and installed on ... | 3 files |
 | `claude/phone-apk-agentic-os-764f34` | 28 | `bedc23c` 2026-11-27 docs(status): phone APK rebuilt from main 4866634 and installed on ... | clean |
 | `feat/language-hub` | 27 | `4866634` 2026-11-27 docs(status): section-pass merged into main (f555484) and pushed | clean |
 | `section-pass` | 25 | `f8ce963` 2026-11-27 Merge main (8bb443a: kill switch + options guard) into section-pass | no worktree |

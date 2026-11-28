@@ -317,14 +317,15 @@ Several were held for the latency work, which is now in main: 15, 16.6, 11.10, S
 ## Branches
 
 <!-- AUTO:BRANCHES (scripts/update_status.py rewrites this block) -->
-_Refreshed 2026-11-27 18:22 by `python scripts/update_status.py`._
+_Refreshed 2026-11-27 19:24 by `python scripts/update_status.py`._
 
 **Not merged into main yet**
 
 | Branch | Commits ahead | Last commit | Uncommitted |
 |---|---|---|---|
+| `claude/gabagoul-section-status-225cdd` | 29 | `1611bde` 2026-11-27 docs: section-pass master doc in docs/ (PDF + text copy); STATUS: d... | clean |
+| `section-26-engine` | 67 | `913cef7` 2026-11-27 feat(engine): engine sidecar + engine_call so the Engine / Models s... | 1 files |
 | `claude/phone-apk-agentic-os-764f34` | 28 | `bedc23c` 2026-11-27 docs(status): phone APK rebuilt from main 4866634 and installed on ... | clean |
-| `section-26-engine` | 65 | `2b44e0f` 2026-11-27 feat(tony): latency fast path behind fastpath.json (all OFF): small... | 2 files |
 | `feat/language-hub` | 27 | `4866634` 2026-11-27 docs(status): section-pass merged into main (f555484) and pushed | clean |
 | `section-pass` | 25 | `f8ce963` 2026-11-27 Merge main (8bb443a: kill switch + options guard) into section-pass | no worktree |
 | `claude/upbeat-wing-e87be0` | 11 | `5ca67c0` 2026-11-27 Merge main (196b2f8: Sections 8-10 PR #10) into claude/upbeat-wing-... | no worktree |

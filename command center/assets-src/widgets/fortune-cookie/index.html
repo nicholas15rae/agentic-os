@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fortune Cookie</title>
+  <!--
+    Fortune cookie widget (UI fixes 3, hand-fixed from the 11-27 Play Place build).
+    Tap the cookie: it wobbles, cracks into two halves that swing apart, and a paper slip slides
+    out with today's fortune (the same one all day; a new one each day). "Another fortune" closes
+    the cookie and cracks it again with a random one. History keeps the last 5. Six lucky numbers
+    per fortune. Reduced motion: no wobble or swing, the halves just part. Style kit: --cc-* vars,
+    live theme over postMessage ({ type: "cc-theme", vars }).
+  -->
+  <style>
+    :root {
+      --cc-accent: #ff7a2f;
+      --cc-accent-2: #00e5c3;
+      --cc-card: rgba(24, 28, 38, 0.62);
+      --cc-text: #f8fafc;
+      --cc-text-2: #a1a8b8;
+      --cc-text-3: #5a6275;
+      --cc-radius: 20px;
+      --cc-font: ui-sans-serif, system-ui, sans-serif;
+      --cc-font-scale: 1;
+      --cc-border: rgba(255, 255, 255, 0.16);
+      --cc-page: #10131a;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; }
+    body {
+      background: var(--cc-page);
+      color: var(--cc-text);
+      font-family: var(--cc-font);
+      display: flex;
+      justify-content: center;
+      padding: 14px;
+      overflow-y: auto;
+    }
+    .wrap { width: 100%; max-width: 460px; display: flex; flex-direction: column; gap: 12px; }
+    .card { background: var(--cc-card); border: 1px solid var(--cc-border); border-radius: var(--cc-radius); }
+
+    .stage { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 14px 14px 10px; }
+    #cookie {
+      width: min(100%, 300px);
+      aspect-ratio: 280 / 150;
+      cursor: pointer;
+      border-radius: 16px;
+      outline: none;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+      touch-action: manipulation;
+    }
+    #cookie:focus-visible { box-shadow: 0 0 0 2px var(--cc-accent-2); }
+    #cookie svg { width: 100%; height: 100%; display: block; overflow: visible; }
+    #cookie .half, #cookie .halves, #cookie .slip, #cookie .crumb { transform-box: fill-box; }
+    #cookie .halves { transform-origin: 50% 85%; }
+    #cookie .half.left { transform-origin: 100% 85%; }
+    #cookie .half.right { transform-origin: 0% 85%; }
+    #cookie .slip { transform-origin: 50% 50%; transform: scaleX(0); opacity: 0; }
+    #cookie .crumb { opacity: 0; }
+    #cookie:hover .halves { filter: brightness(1.06); }
+    .hint { font-size: calc(12px * var(--cc-font-scale)); color: var(--cc-text-3); }
+
+    #fortune-display { padding: 14px 18px; text-align: center; min-height: 64px; display: grid; place-items: center; }
+    #fortune-text { font-size: calc(15px * var(--cc-font-scale)); line-height: 1.5; color: var(--cc-text-2); }
+    #fortune-display.open #fortune-text { color: var(--cc-text); }
+    #fortune-display .tag { display: block; margin-bottom: 4px; font-size: calc(10px * var(--cc-font-scale)); letter-spacing: 0.08em; text-transform: uppercase; color: var(--cc-accent); }
+
+    #lucky-container { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; padding: 10px; }
+    .lucky-number {
+      min-width: 38px; padding: 6px 8px; border-radius: 999px; text-align: center;
+      font-weight: 700; font-variant-numeric: tabular-nums;
+      font-size: calc(14px * var(--cc-font-scale)); color: var(--cc-accent-2); background: rgba(0, 0, 0, 0.22);
+    }
+
+    .row { display: flex; justify-content: center; }
+    #new-fortune-btn {
+      padding: 10px 26px; border: none; border-radius: 999px; cursor: pointer;
+      font: 600 calc(14px * var(--cc-font-scale)) var(--cc-font); color: #fff; background: var(--cc-accent);
+      transition: transform 140ms cubic-bezier(0.23, 1, 0.32, 1), filter 140ms;
+    }
+    #new-fortune-btn:hover { filter: brightness(1.08); }
+    #new-fortune-btn:active { transform: scale(0.96); }
+    #new-fortune-btn:disabled { opacity: 0.5; cursor: default; }
+
+    #history-container { padding: 10px 14px; display: flex; flex-direction: column; gap: 2px; max-height: 170px; overflow-y: auto; }
+    #history-container h2 { font-size: calc(10px * var(--cc-font-scale)); letter-spacing: 0.08em; text-transform: uppercase; color: var(--cc-text-3); margin-bottom: 4px; }
+    .history-item { font-size: calc(13px * var(--cc-font-scale)); color: var(--cc-text-2); padding: 6px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.06); }
+    .history-item:last-child { border-bottom: none; }
+    .history-item small { display: block; color: var(--cc-text-3); font-size: calc(11px * var(--cc-font-scale)); }
+    .empty-history { font-size: calc(13px * var(--cc-font-scale)); color: var(--cc-text-3); text-align: center; padding: 6px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card stage">
+      <div id="cookie" role="button" tabindex="0" aria-label="Fortune cookie: tap to crack it open">
+        <svg viewBox="0 0 280 150" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <defs>
+            <linearGradient id="fc-shell" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#f6cf86" />
+              <stop offset="60%" stop-color="#e2a552" />
+              <stop offset="100%" stop-color="#c07d33" />
+            </linearGradient>
+            <linearGradient id="fc-inner" x1="0" y1="0" x2="1" y2="0">
+              <stop offset="0%" stop-color="#b9722c" />
+              <stop offset="100%" stop-color="#8c5420" />
+            </linearGradient>
+          </defs>
+          <ellipse cx="140" cy="132" rx="96" ry="7" fill="rgba(0,0,0,0.28)" />
+          <!-- The paper slip sits behind the halves and stretches out when they part. -->
+          <g class="slip">
+            <rect x="62" y="70" width="156" height="22" rx="2" fill="#fbf6ea" />
+            <rect x="74" y="78" width="72" height="2.4" rx="1.2" fill="#c0392b" opacity="0.7" />
+            <rect x="150" y="78" width="54" height="2.4" rx="1.2" fill="#c0392b" opacity="0.45" />
+            <rect x="96" y="84" width="88" height="2" rx="1" fill="#c0392b" opacity="0.35" />
+          </g>
+          <g class="halves">
+            <!-- Each half: the domed shell, its pointed wing tip, and the darker inside of the fold along the bottom. -->
+            <g class="half left">
+              <path d="M140 26 C104 18 56 34 30 84 C52 90 80 88 104 100 C118 107 132 110 140 106 Z" fill="url(#fc-shell)" stroke="#a8682a" stroke-width="1.6" stroke-linejoin="round" />
+              <path d="M52 86 C78 74 112 70 140 62 L140 106 C132 110 118 107 104 100 C88 92 70 88 52 86 Z" fill="url(#fc-inner)" />
+              <path d="M140 62 C120 72 112 86 116 102" fill="none" stroke="#7a461a" stroke-width="1.4" stroke-linecap="round" opacity="0.7" />
+              <path d="M62 54 C80 38 104 30 128 30" fill="none" stroke="#fff3d6" stroke-width="3" stroke-linecap="round" opacity="0.45" />
+            </g>
+            <g class="half right">
+              <path d="M140 26 C176 18 224 34 250 84 C228 90 200 88 176 100 C162 107 148 110 140 106 Z" fill="url(#fc-shell)" stroke="#a8682a" stroke-width="1.6" stroke-linejoin="round" />
+              <path d="M228 86 C202 74 168 70 140 62 L140 106 C148 110 162 107 176 100 C192 92 210 88 228 86 Z" fill="url(#fc-inner)" />
+              <path d="M140 62 C160 72 168 86 164 102" fill="none" stroke="#7a461a" stroke-width="1.4" stroke-linecap="round" opacity="0.7" />
+            </g>
+          </g>
+          <circle class="crumb" cx="140" cy="60" r="2.4" fill="#d9964a" />
+          <circle class="crumb" cx="142" cy="72" r="1.8" fill="#e2a552" />
+          <circle class="crumb" cx="138" cy="82" r="2" fill="#c07d33" />
+          <circle class="crumb" cx="141" cy="50" r="1.6" fill="#f0c27a" />
+        </svg>
+      </div>
+      <p class="hint" id="hint">Tap the cookie</p>
+    </div>
+
+    <div class="card" id="fortune-display" aria-live="polite">
+      <p id="fortune-text">Tap the cookie to crack it open.</p>
+    </div>
+
+    <div class="card" id="lucky-container" aria-label="Lucky numbers">
+      <div class="lucky-number" id="l1">-</div>
+      <div class="lucky-number" id="l2">-</div>
+      <div class="lucky-number" id="l3">-</div>
+      <div class="lucky-number" id="l4">-</div>
+      <div class="lucky-number" id="l5">-</div>
+      <div class="lucky-number" id="l6">-</div>
+    </div>
+
+    <div class="row"><button id="new-fortune-btn" type="button">Another fortune</button></div>
+
+    <div class="card" id="history-container">
+      <h2>Past fortunes</h2>
+      <div class="empty-history">Your fortunes will show up here.</div>
+    </div>
+  </div>
+
+  <script>
+    // Live theme from the dashboard (style kit).
+    addEventListener("message", function (e) {
+      var d = e.data;
+      if (d && d.type === "cc-theme" && d.vars) for (var k in d.vars) if (k.indexOf("--cc-") === 0) document.documentElement.style.setProperty(k, String(d.vars[k]));
+    });
+
+    var FORTUNES = [
+      "The thing you keep putting off will take ten minutes. Start it.",
+      "A small yes today opens a bigger door next month.",
+      "Someone is about to remember you kindly.",
+      "Your next good idea arrives while you are doing the dishes.",
+      "Ask the question. The answer is friendlier than you think.",
+      "You are one rehearsal away from easy.",
+      "A message you send this week lands at exactly the right time.",
+      "Finish one thing before lunch and the day is yours.",
+      "Luck likes people who show up twice.",
+      "The long way round has a good view this time.",
+      "Something you made will travel further than you expect.",
+      "Rest is part of the work. Take the evening.",
+      "A stranger's compliment is coming. Believe it.",
+      "Say the plan out loud and it starts to happen.",
+      "The quiet option is the right one today.",
+      "You already know the answer. Trust the first one.",
+      "A cheque, a call or a callback: one of them is on its way.",
+      "Clear one shelf and your head clears with it.",
+      "Your patience is about to pay a small, sweet dividend.",
+      "Good news travels by text this week.",
+      "The next step is smaller than it looks.",
+      "Laugh at the mistake, then keep the lesson.",
+      "Someone needs exactly the help you are good at.",
+      "Today is a good day to be a little bold."
+    ];
+
+    var KEY = "fortune-cookie.v2";
+    var REDUCED = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    // Storage may be blocked in a sandboxed frame: fall back to memory.
+    var mem = null;
+    function load() {
+      try { var raw = localStorage.getItem(KEY); if (raw) return JSON.parse(raw); } catch (e) { /* sandboxed */ }
+      return mem || { today: null, history: [] };
+    }
+    function save(s) {
+      mem = s;
+      try { localStorage.setItem(KEY, JSON.stringify(s)); } catch (e) { /* sandboxed */ }
+    }
+
+    function dayKey(d) {
+      d = d || new Date();
+      return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+    }
+    // Small seeded generator, so a day's fortune and numbers stay the same all day.
+    function seeded(seed) {
+      var h = 2166136261;
+      for (var i = 0; i < seed.length; i++) { h ^= seed.charCodeAt(i); h = Math.imul(h, 16777619); }
+      return function () { h += 0x6d2b79f5; var t = h; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+    }
+    function luckyNumbers(rand) {
+      var out = [];
+      while (out.length < 6) { var n = 1 + Math.floor(rand() * 49); if (out.indexOf(n) < 0) out.push(n); }
+      return out.sort(function (a, b) { return a - b; });
+    }
+    function fortuneFor(rand, avoid) {
+      var pick = FORTUNES[Math.floor(rand() * FORTUNES.length)];
+      if (pick === avoid) pick = FORTUNES[(FORTUNES.indexOf(pick) + 1) % FORTUNES.length];
+      return pick;
+    }
+
+    var cookie = document.getElementById("cookie");
+    var left = cookie.querySelector(".half.left");
+    var right = cookie.querySelector(".half.right");
+    var halves = cookie.querySelector(".halves");
+    var slip = cookie.querySelector(".slip");
+    var crumbs = Array.prototype.slice.call(cookie.querySelectorAll(".crumb"));
+    var display = document.getElementById("fortune-display");
+    var text = document.getElementById("fortune-text");
+    var hint = document.getElementById("hint");
+    var btn = document.getElementById("new-fortune-btn");
+    var hist = document.getElementById("history-container");
+    var nums = [1, 2, 3, 4, 5, 6].map(function (i) { return document.getElementById("l" + i); });
+
+    var open = false;
+    var busy = false;
+    var current = null;
+
+    function anim(el, frames, opts) {
+      if (!el.animate) { var last = frames[frames.length - 1]; for (var k in last) el.style[k] = last[k]; return Promise.resolve(); }
+      var a = el.animate(frames, Object.assign({ fill: "forwards" }, opts));
+      return a.finished.catch(function () {});
+    }
+
+    var OPEN_L = "translate(-30px, 8px) rotate(-17deg)";
+    var OPEN_R = "translate(30px, 8px) rotate(17deg)";
+
+    function crackOpen() {
+      var ease = "cubic-bezier(0.2, 0.85, 0.25, 1.1)";
+      var wobble = REDUCED ? Promise.resolve() : anim(halves, [
+        { transform: "rotate(0deg)" }, { transform: "rotate(-3deg)" }, { transform: "rotate(3deg)" }, { transform: "rotate(-1.5deg)" }, { transform: "rotate(0deg)" }
+      ], { duration: 260, easing: "ease-in-out", fill: "none" });
+      return wobble.then(function () {
+        var d = REDUCED ? 1 : 520;
+        var parts = [
+          anim(left, [{ transform: "translate(0,0) rotate(0deg)" }, { transform: OPEN_L }], { duration: d, easing: ease }),
+          anim(right, [{ transform: "translate(0,0) rotate(0deg)" }, { transform: OPEN_R }], { duration: d, easing: ease }),
+          anim(slip, [{ transform: "scaleX(0.05)", opacity: 0 }, { transform: "scaleX(1)", opacity: 1 }], { duration: REDUCED ? 1 : 420, delay: REDUCED ? 0 : 140, easing: "cubic-bezier(0.23, 1, 0.32, 1)" })
+        ];
+        if (!REDUCED) crumbs.forEach(function (c, i) {
+          var dx = (i % 2 ? 1 : -1) * (14 + i * 7), dy = 28 + i * 6;
+          parts.push(anim(c, [{ transform: "translate(0,0)", opacity: 1 }, { transform: "translate(" + dx + "px," + dy + "px)", opacity: 0 }], { duration: 560, easing: "cubic-bezier(0.3, 0, 0.7, 1)" }));
+        });
+        return Promise.all(parts);
+      });
+    }
+
+    function closeUp() {
+      var d = REDUCED ? 1 : 240;
+      var ease = "cubic-bezier(0.4, 0, 1, 1)";
+      return Promise.all([
+        anim(slip, [{ transform: "scaleX(1)", opacity: 1 }, { transform: "scaleX(0)", opacity: 0 }], { duration: d, easing: ease }),
+        anim(left, [{ transform: OPEN_L }, { transform: "translate(0,0) rotate(0deg)" }], { duration: d, easing: ease }),
+        anim(right, [{ transform: OPEN_R }, { transform: "translate(0,0) rotate(0deg)" }], { duration: d, easing: ease })
+      ]);
+    }
+
+    function show(f) {
+      current = f;
+      text.innerHTML = "";
+      var tag = document.createElement("span");
+      tag.className = "tag";
+      tag.textContent = f.daily ? "Today's fortune" : "Another fortune";
+      text.appendChild(tag);
+      text.appendChild(document.createTextNode(f.text));
+      display.classList.add("open");
+      f.numbers.forEach(function (n, i) { nums[i].textContent = n; });
+      if (!REDUCED && display.animate) display.animate([{ opacity: 0, transform: "translateY(6px)" }, { opacity: 1, transform: "none" }], { duration: 260, easing: "cubic-bezier(0.23, 1, 0.32, 1)" });
+    }
+
+    function remember(f) {
+      var s = load();
+      s.history = [{ text: f.text, day: f.day }].concat(s.history || []).slice(0, 5);
+      if (f.daily) s.today = { day: f.day, text: f.text, numbers: f.numbers };
+      save(s);
+      renderHistory();
+    }
+
+    function renderHistory() {
+      var items = (load().history || []).slice(0, 5);
+      hist.innerHTML = "<h2>Past fortunes</h2>";
+      if (!items.length) { hist.insertAdjacentHTML("beforeend", '<div class="empty-history">Your fortunes will show up here.</div>'); return; }
+      items.forEach(function (h) {
+        var el = document.createElement("div");
+        el.className = "history-item";
+        el.textContent = h.text;
+        var when = document.createElement("small");
+        when.textContent = h.day === dayKey() ? "Today" : h.day;
+        el.appendChild(when);
+        hist.appendChild(el);
+      });
+    }
+
+    function todays() {
+      var day = dayKey();
+      var s = load();
+      if (s.today && s.today.day === day) return { text: s.today.text, numbers: s.today.numbers, day: day, daily: true, seen: true };
+      var r = seeded("fortune:" + day);
+      return { text: fortuneFor(r), numbers: luckyNumbers(r), day: day, daily: true, seen: false };
+    }
+
+    function crack() {
+      if (open || busy) return;
+      busy = true;
+      var f = todays();
+      crackOpen().then(function () {
+        open = true;
+        busy = false;
+        show(f);
+        if (!f.seen) remember(f);
+        hint.textContent = "Tap again to close it";
+        cookie.setAttribute("aria-label", "Fortune cookie (open): tap to close it");
+      });
+    }
+
+    function close() {
+      if (!open || busy) return Promise.resolve();
+      busy = true;
+      return closeUp().then(function () {
+        open = false;
+        busy = false;
+        hint.textContent = "Tap the cookie";
+        cookie.setAttribute("aria-label", "Fortune cookie: tap to crack it open");
+      });
+    }
+
+    function another() {
+      if (busy) return;
+      btn.disabled = true;
+      var r = seeded("another:" + Date.now() + ":" + Math.random());
+      var f = { text: fortuneFor(r, current && current.text), numbers: luckyNumbers(r), day: dayKey(), daily: false };
+      close().then(function () {
+        busy = true;
+        return crackOpen();
+      }).then(function () {
+        open = true;
+        busy = false;
+        btn.disabled = false;
+        show(f);
+        remember(f);
+        hint.textContent = "Tap again to close it";
+      });
+    }
+
+    cookie.addEventListener("click", function () { open ? close() : crack(); });
+    cookie.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open ? close() : crack(); }
+    });
+    btn.addEventListener("click", another);
+    renderHistory();
+  </script>
+</body>
+</html>
